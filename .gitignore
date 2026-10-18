@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv*/
+
+# 运行数据（docker compose ./data 挂载点）与本地测试数据目录
+data/
+.smoke-data*/
+.emu-data/
+.demo-data/
+.qa-data*/
+.mobile-test-data/
+.music-test/
+.ts-data/
+
+# 本地开发种子脚本与测试数据（不入库）
+scripts/seed_dev_data.py
+scripts/seed_emu_e2e.py
+scripts/seed_resume.py
+.emu-ui-data/
+.emu-dev-data/

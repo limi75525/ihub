@@ -1,0 +1,20 @@
+services:
+  ihub:
+    build: .
+    container_name: ihub
+    restart: unless-stopped
+    ports:
+      - "18765:8000"
+    environment:
+      - TZ=Asia/Shanghai
+      - IHUB_TIMEZONE=Asia/Shanghai
+      # 后端已直接托管前端页面（镜像内 /app/frontend-dist），无独立前端容器。
+      # 直连部署时后端默认不采信代理头；经外层反代（Lucky/nginx/Caddy）部署、需要按真实
+      # 客户端 IP 限流时，取消下面这行的注释后重启（取 XFF 从右往左第 HOPS 个值）：
+      # - IHUB_TRUST_PROXY_HEADERS=true
+    volumes:
+      - ./data:/app/data
+      # 容器监控（可选）：挂载后到 设置 → 系统 打开「容器监控与控制」（默认关），即可查看本机全部容器状态/日志
+      # - /var/run/docker.sock:/var/run/docker.sock
+      # 更稳妥的收敛方案：不挂载 socket，改用 docker-socket-proxy 并给 ihub 加
+      # environment: IHUB_DOCKER_HOST=tcp://docker-socket-proxy:2375（完整步骤见 ../deploy/NAS部署教程.md）

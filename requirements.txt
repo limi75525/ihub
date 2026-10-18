@@ -1,0 +1,19 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+# h11<0.16 有 HTTP 请求走私 CVE-2025-43859（随 uvicorn[standard] 安装，显式设下限）
+h11>=0.16.0
+sqlalchemy>=2.0.40
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+pyjwt>=2.9.0
+bcrypt>=4.2.0
+apscheduler>=3.10.1,<4.0.0
+# <0.0.18 有 multipart 解析 DoS CVE-2024-53981
+python-multipart>=0.0.18
+cryptography
+# <10.3 有 ImageMath 任意代码执行 CVE-2024-28219
+pillow>=10.3.0
+mutagen
+EbookLib
+pypdf
+mobi
