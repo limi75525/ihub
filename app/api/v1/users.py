@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.source import Source
 from app.models.user import User
 from app.schemas.auth import MAX_PASSWORD_BYTES, UserOut
+from app.core import data_dirs
 
 router = APIRouter(tags=["users"], prefix="/users")
 
@@ -166,7 +167,7 @@ def get_avatar(user_id: int, user: User = Depends(get_media_user), db: Session =
     target = db.get(User, user_id)
     if not target or not target.avatar_path:
         raise HTTPException(404, "无头像")
-    path = data_file(settings.DATA_DIR, target.avatar_path)
+    path = data_dirs.resolve_rel(target.avatar_path)
     if not path or not path.is_file():
         raise HTTPException(404, "无头像")
     from app.api.v1.auth import media_file_headers

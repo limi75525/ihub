@@ -18,6 +18,7 @@ from app.db.session import get_db
 from app.models.message import Message
 from app.models.source import Source
 from app.models.device import Device
+from app.models.system_setting import get_setting_db
 from app.models.user import User
 from app.scheduler import sync_email_jobs
 from app.schemas.message import MessageOut
@@ -25,6 +26,7 @@ from app.schemas.source import EmailTestIn, SourceCreate, SourceOut, SourceUpdat
 from app.services.imap_service import last_error, poll_source, test_connection
 from app.services.logo_urls import file_url
 from app.services.uploads import read_limited, save_unique
+from app.core import data_dirs
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -100,12 +102,12 @@ def _clear_logo_file(source: Source) -> None:
 
 @router.get("", response_model=list[SourceOut])
 def list_sources(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    sources = (
-        db.query(Source)
-        .filter(Source.user_id == user.id, Source.is_deleted.is_(False))
-        .order_by(Source.sort_order.asc(), Source.id.asc())
-        .all()
-    )
+    q = db.query(Source).filter(Source.user_id == user.id, Source.is_deleted.is_(False))
+    # 系统来源（种子事件等）普通用户始终不可见；管理员可在
+    # 设置 → 系统 → 隐藏管理员系统通知 中隐藏（默认显示）。
+    if user.role != "admin" or get_setting_db(db, "hide_system_sources", "false") == "true":
+        q = q.filter(Source.is_system.is_(False))
+    sources = q.order_by(Source.sort_order.asc(), Source.id.asc()).all()
     # 一次分组查询取全部来源的消息计数，避免逐来源 COUNT
     counts: dict[int, dict] = {}
     if sources:
@@ -201,6 +203,8 @@ def update_source(
     db: Session = Depends(get_db),
 ):
     source = _own_source(db, user, source_id)
+    if source.is_system and set(body.model_fields_set) - {"is_active"}:
+        raise HTTPException(400, "系统来源只支持启用/停用")
     old_type = source.type
     # 重命名唯一性校验（排除自身）
     if "name" in body.model_fields_set:
@@ -263,6 +267,8 @@ def delete_source(
     from app.services.ingest_service import delete_attachments
 
     source = _own_source(db, user, source_id)
+    if source.is_system:
+        raise HTTPException(400, "系统来源不可删除，只能停用")
     # 启用中的服务仍在收消息（设备推送/邮箱轮询），禁止直接删除：先停用（is_active=False）
     # 才允许删。前端按钮在启用态置灰并提示，这里兜底拦 API 直调（App 端也是同一入口）。
     if source.is_active:
@@ -328,7 +334,7 @@ def _replace_source_logo(source: Source, ext: str, data: bytes) -> str:
     """清旧 Logo 文件并落盘新文件（磁盘写放线程池）；返回入库相对路径。"""
     _clear_logo_file(source)
     source.logo_url = None
-    return save_unique("logos", f"source_{source.id}", ext, data)
+    return save_unique(data_dirs.AVATARS, f"source_{source.id}", ext, data)
 
 
 @router.post("/{source_id}/logo", response_model=SourceOut)
@@ -363,7 +369,7 @@ def get_logo_file(
     source = _own_source(db, user, source_id)
     if not source.logo_path:
         raise HTTPException(404, "未上传 Logo")
-    path = data_file(settings.DATA_DIR, source.logo_path)
+    path = data_dirs.resolve_rel(source.logo_path)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 文件缺失")
     return FileResponse(path)

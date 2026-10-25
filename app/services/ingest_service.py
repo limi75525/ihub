@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.models.message import Message
 from app.models.source import Source
 from app.services.events import broker
+from app.core import data_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def save_attachments(
     saved = []
     if not attachments:
         return saved
-    base = Path(settings.DATA_DIR) / "attachments" / str(source_id) / dedup_hash[:16]
+    base = Path(settings.DATA_DIR) / data_dirs.ATTACHMENTS / str(source_id) / dedup_hash[:16]
     base.mkdir(parents=True, exist_ok=True)
     for att in attachments:
         filename = _FILENAME_SAFE.sub("_", att.get("filename") or "unnamed").strip() or "unnamed"

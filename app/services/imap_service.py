@@ -23,6 +23,7 @@ from app.db.session import SessionLocal
 from app.models.message import Message
 from app.models.source import Source
 from app.services.ingest_service import create_message, save_attachments
+from app.core import data_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ def _update_existing_email(db: Session, existing: Message, parsed: dict, uid: in
 
     from app.core.config import settings
 
-    att_dir = Path(settings.DATA_DIR) / "attachments" / str(existing.source_id) / existing.dedup_hash[:16]
+    att_dir = Path(settings.DATA_DIR) / data_dirs.ATTACHMENTS / str(existing.source_id) / existing.dedup_hash[:16]
     if att_dir.is_dir():
         shutil.rmtree(att_dir, ignore_errors=True)
 

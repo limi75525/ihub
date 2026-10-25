@@ -15,6 +15,7 @@ from app.models.nav_link import NavLink
 from app.models.user import User
 from app.services.logo_urls import file_url
 from app.services.uploads import read_limited, save_unique
+from app.core import data_dirs
 
 router = APIRouter(prefix="/nav", tags=["nav"])
 
@@ -59,7 +60,7 @@ def _own_link(db: Session, user: User, link_id: int) -> NavLink:
 
 
 def _remove_logo_file(link: NavLink):
-    path = data_file(settings.DATA_DIR, link.logo_path)
+    path = data_dirs.resolve_rel(link.logo_path)
     if link.logo_path and not path:
         return  # 越界/非法路径：不删文件也不动字段（与旧行为一致）
     if path:
@@ -161,7 +162,7 @@ async def create_link(
     logo = await _read_logo(file)
     if logo:
         data, ext = logo
-        link.logo_path = await run_in_threadpool(save_unique, "nav_logos", f"nav_{user.id}", ext, data)
+        link.logo_path = await run_in_threadpool(save_unique, data_dirs.NAV_LOGOS, f"nav_{user.id}", ext, data)
         link.logo_url = ""
     else:
         link.logo_url = (safe_logo_url(logo_url.strip()) or "")[:1024]
@@ -191,7 +192,7 @@ async def update_link(
     if logo:
         data, ext = logo
         _remove_logo_file(link)
-        link.logo_path = await run_in_threadpool(save_unique, "nav_logos", f"nav_{user.id}", ext, data)
+        link.logo_path = await run_in_threadpool(save_unique, data_dirs.NAV_LOGOS, f"nav_{user.id}", ext, data)
         link.logo_url = ""
     elif clear_logo == "1":
         _remove_logo_file(link)
@@ -236,7 +237,7 @@ def get_logo(
     link = db.query(NavLink).filter(NavLink.id == link_id, NavLink.user_id == user.id).first()
     if not link or not link.logo_path:
         raise HTTPException(404, "Logo 不存在")
-    path = data_file(settings.DATA_DIR, link.logo_path)
+    path = data_dirs.resolve_rel(link.logo_path)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 不存在")
     from app.api.v1.auth import media_file_headers

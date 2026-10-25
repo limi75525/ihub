@@ -64,6 +64,62 @@ def register_retention_job() -> None:
     )
 
 
+def register_janitor_job() -> None:
+    """每日缓存/孤儿文件清理（UTC 19:40 = 北京时间 03:40，与 retention 错峰）。"""
+    from app.services.janitor import run_janitor
+
+    scheduler.add_job(
+        run_janitor,
+        CronTrigger(hour=19, minute=40),
+        id="cache_janitor",
+        replace_existing=True,
+    )
+
+
+def register_update_check_job() -> None:
+    """每日检查一次 iHub 新版本（GitHub Release），有新版通知管理员（每版本只提醒一次）。"""
+    from app.services.notify_service import background_notify_admins
+
+    def _check() -> None:
+        import json as jsonlib
+        import re as _re
+
+        from app.core import outbound
+        from app.core.config import settings as cfg
+
+        try:
+            url = "https://api.github.com/repos/limi75525/ihub/releases/latest"
+            req = outbound.urllib.request.Request(url, headers={"User-Agent": "iHub/1.0", "Accept": "application/json"})
+            with outbound.opener_for(url).open(req, timeout=15) as resp:
+                data = jsonlib.loads(resp.read(1_000_000))
+            tag = str(data.get("tag_name") or "").lstrip("vV")
+            if not _re.match(r"^\d+(\.\d+)*$", tag):
+                return
+            local = [int(x) for x in _re.match(r"^(\d+(?:\.\d+)*)", cfg.APP_VERSION).group(1).split(".")]
+            remote = [int(x) for x in tag.split(".")]
+            if remote <= local:
+                return
+            body = f"检测到新版本 v{tag}（当前 v{cfg.APP_VERSION}），请到 GitHub Releases 查看更新内容。"
+            background_notify_admins(
+                type="update",
+                title="iHub 有新版本",
+                body=body,
+                link="#/settings?tab=about",
+                dedup_key=f"update:{tag}",
+            )
+        except Exception as e:
+            import logging
+
+            logging.getLogger(__name__).debug("版本更新检查失败：%s", e)
+
+    scheduler.add_job(
+        _check,
+        CronTrigger(hour=21, minute=0),
+        id="update_check",
+        replace_existing=True,
+    )
+
+
 def register_purge_job() -> None:
     """每日物理清理到期（默认 30 天）的逻辑删除数据（UTC 04:00 = 北京时间 12:00）。"""
     scheduler.add_job(

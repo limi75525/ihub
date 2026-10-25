@@ -14,6 +14,7 @@ from io import BytesIO
 from pathlib import Path
 
 from app.core.config import settings
+from app.core import data_dirs
 
 # TXT 章节标题行：第X章/节/卷/回/部/集、序章、楔子、前后记、Chapter N 等
 _TXT_CHAPTER_RE = re.compile(
@@ -352,7 +353,7 @@ def save_cover(book_id: int, cover_bytes: bytes) -> str | None:
     """封面落盘 data/book_covers/，返回相对路径；内容为空返回 None。"""
     if not cover_bytes or len(cover_bytes) < 64:
         return None
-    d = Path(settings.DATA_DIR) / "book_covers"
+    d = Path(settings.DATA_DIR) / data_dirs.BOOK_COVERS
     d.mkdir(parents=True, exist_ok=True)
     ext = ".png" if cover_bytes[:8] == b"\x89PNG\r\n\x1a\n" else ".jpg"
     name = f"book_{book_id}_{hashlib.sha1(cover_bytes).hexdigest()[:10]}{ext}"

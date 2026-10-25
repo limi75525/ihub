@@ -74,6 +74,8 @@ class SourceOut(BaseModel):
     poll_interval: int
     folder: str
     is_active: bool
+    # 系统来源（种子事件等）：普通用户不下发；管理员可见且只能启停
+    is_system: bool = False
     last_seen_at: datetime | None
     last_poll_at: datetime | None
     created_at: datetime

@@ -90,12 +90,13 @@ def dashboard(
         if 0 <= idx < 7 and channel in days[day_keys[idx]]:
             days[day_keys[idx]][channel] += n
 
-    # 来源统计
+    # 来源统计：系统来源（种子事件）只用于消息归属，不算「接入服务」也不参与在线计数
     sources = db.query(Source).filter(Source.user_id == user.id, Source.is_deleted.is_(False)).all()
+    user_sources = [s for s in sources if not s.is_system]
     offline_minutes = settings.DEVICE_OFFLINE_MINUTES
     now_utc = datetime.now(timezone.utc)
     online = 0
-    for s in sources:
+    for s in user_sources:
         if s.type == "email":
             online += bool(s.is_active and s.last_poll_at)
         else:
@@ -125,7 +126,7 @@ def dashboard(
         "trend": [
             {"date": d, **days[d]} for d in sorted(days)
         ],
-        "sources_total": len(sources),
+        "sources_total": len(user_sources),
         "sources_online": online,
         "unread_by_channel": {
             c: n
@@ -152,7 +153,7 @@ def dashboard(
             for m in latest
         ],
         # 总览用户卡 8 项统计（两行：消息/影视/音乐/书籍 + 服务/容器/文件/导航）
-        "hub": _hub_counts(user, db, sources, total),
+        "hub": _hub_counts(user, db, user_sources, total),
     }
 
 

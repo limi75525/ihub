@@ -1,0 +1,1 @@
+import{Ht as e,_n as t}from"./vue-router-DEBuQMrJ.js";function n(n,r){return t(n,e=>{e!==void 0&&(r.value=e)}),e(()=>n.value===void 0?r.value:n.value)}export{n as t};

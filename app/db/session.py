@@ -8,6 +8,10 @@ engine = create_engine(
     # timeout：写锁被占（扫描线程批量写 / ingest 提交 nonce）时最多等 30s 再报
     # database is locked，而不是 pysqlite 默认 5s——单 worker 下读写并发的主要兜底
     connect_args={"check_same_thread": False, "timeout": 30},
+    # 默认 pool_size=5+overflow=10 只有 15 个并发会话：上游（MP/qB）不可达时，
+    # 持会话干等上游超时的请求会把池占满，全站接口排队 30s 才报错——放宽到 30
+    pool_size=10,
+    max_overflow=20,
     pool_pre_ping=True,
 )
 

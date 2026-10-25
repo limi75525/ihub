@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.data_dirs import migrate_layout, migrate_network_proxy
 from app.core.crypto import decrypt_text, encrypt_text
 from app.core.netutil import client_ip
 from app.db.base import Base
@@ -18,11 +19,19 @@ from app.models import Source  # noqa: F401 确保模型已注册
 from app.models.ingest_nonce import IngestNonce  # noqa: F401 防重放表
 from app.models.system_setting import get_setting_db
 from app.models.user import User
-from app.scheduler import register_purge_job, register_retention_job, scheduler, sync_email_jobs
+from app.scheduler import (
+    register_janitor_job,
+    register_purge_job,
+    register_update_check_job,
+    register_retention_job,
+    scheduler,
+    sync_email_jobs,
+)
 from app.services.retention import run_retention_cleanup
 from app.services.purge import purge_expired
-from app.services import docker_service
+from app.services import docker_service, seed_events, seed_traffic, seed_transfer
 from app.services.events import broker
+from app.services.seed_common import SeedError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,6 +45,7 @@ _REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("deleted_at", "DATETIME"),
     ],
     "users": [
+        ("last_login_ip", "VARCHAR(64) DEFAULT ''"),
         ("is_deleted", "BOOLEAN DEFAULT 0"),
         ("deleted_at", "DATETIME"),
         ("pwd_version", "INTEGER DEFAULT 0"),
@@ -48,6 +58,7 @@ _REQUIRED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("deleted_at", "DATETIME"),
         ("sort_order", "INTEGER DEFAULT 0"),
         ("imap_verify_tls", "BOOLEAN DEFAULT 1"),
+        ("is_system", "BOOLEAN DEFAULT 0"),
     ],
     "devices": [("is_deleted", "BOOLEAN DEFAULT 0"), ("deleted_at", "DATETIME")],
     "logo_rules": [("is_deleted", "BOOLEAN DEFAULT 0"), ("deleted_at", "DATETIME")],
@@ -251,11 +262,43 @@ def _reset_stale_scans() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _cleanup_seed_system_sources() -> None:
+    """删除历史「种子」系统来源及其事件消息（系统通知已接管，接入服务不再展示）。"""
+    from app.models.message import Message
+
+    db = SessionLocal()
+    try:
+        ids = [
+            sid
+            for (sid,) in db.query(Source.id)
+            .filter(Source.is_system.is_(True), Source.name == "种子")
+            .all()
+        ]
+        if not ids:
+            return
+        deleted = (
+            db.query(Message)
+            .filter(Message.source_id.in_(ids))
+            .delete(synchronize_session=False)
+        )
+        db.query(Source).filter(Source.id.in_(ids)).delete(synchronize_session=False)
+        db.commit()
+        logger.info("已清理种子系统来源 %s 个及其事件消息 %s 条", len(ids), deleted)
+    except Exception:
+        db.rollback()
+        logger.exception("清理种子系统来源失败")
+
+
+def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_columns()
+    # data/ 目录布局 v2（ihub_ 前缀）迁移必须最先跑：后续所有模块按新路径读写
+    migrate_layout()
+    migrate_network_proxy()
     _migrate_logo_groups()
     _migrate_email_passwords()
+    # 系统通知上线（2026-10-25）：种子事件不再进消息中心，历史「种子」系统来源及其消息一并清除
+    _cleanup_seed_system_sources()
     broker.set_loop(asyncio.get_running_loop())
 
     # 上个进程若死在扫描中，*_scan_state 的 running 会永久残留导致 /scan 拒绝启动——启动时复位
@@ -271,14 +314,23 @@ async def lifespan(app: FastAPI):
         db.close()
     register_retention_job()
     register_purge_job()
+    register_janitor_job()
+    register_update_check_job()
     run_retention_cleanup()
     purge_expired()
     scheduler.start()
     docker_service.sync_events_worker(broker, docker_monitor_on)
+    # 网络流量只读采样可以常驻：qB 已配置时从启动起保留最近 6 分钟曲线；
+    # 种子事件线程仍按原策略延迟到页面/测试连接成功后再启动。
+    seed_traffic.sync_worker()
+    seed_transfer.start_worker()
     if user_count == 0:
         logger.info("尚未注册用户：首次访问 Web 界面注册的账号将成为管理员")
     logger.info("iHub 后端已启动，数据目录：%s", settings.DATA_DIR)
     yield
+    seed_events.stop_worker()
+    seed_traffic.stop_worker()
+    seed_transfer.stop_worker()
     docker_service.stop_events_worker()
     scheduler.shutdown(wait=False)
 
@@ -392,11 +444,28 @@ if settings.CORS_ORIGINS.strip():
 app.include_router(api_router, prefix="/api/v1")
 
 
+# 前端入口（HTML）永不缓存：构建产物文件名带哈希可长缓存，但 index.html
+# 若被浏览器启发式缓存，发版后用户会一直拿到旧 bundle（本轮多次踩坑）。
+@app.middleware("http")
+async def _no_cache_html(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if request.method == "GET" and (path == "/" or path.endswith(".html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.exception_handler(OverflowError)
 async def int_overflow_handler(request: Request, exc: OverflowError):
     """路径/查询里的 id 超出 SQLite int64 范围时 SQLAlchemy 抛 OverflowError，
     统一回 404（资源不存在语义），避免 500 日志噪音。"""
     return JSONResponse(status_code=404, content={"detail": "资源不存在"})
+
+
+@app.exception_handler(SeedError)
+async def seed_error_handler(request: Request, exc: SeedError):
+    """种子上游错误统一映射；消息已脱敏，不包含密码/API_TOKEN。"""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
 
 
 @app.get("/api/health")

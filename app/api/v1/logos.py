@@ -36,6 +36,7 @@ from app.models.logo_rule import LogoRule
 from app.models.user import User
 from app.services.logo_urls import file_url
 from app.services.uploads import read_limited, save_unique
+from app.core import data_dirs
 
 router = APIRouter(prefix="/logos", tags=["logos"])
 
@@ -565,7 +566,7 @@ def _cache_remote_logo(model_cls, obj_id: int, url: str) -> None:
             if not obj:
                 return
             old_path = obj.logo_path
-            obj.logo_path = save_unique("logos", "cache", ext, data)
+            obj.logo_path = save_unique(data_dirs.AVATARS, "cache", ext, data)
             db.commit()
             # 旧缓存文件（cache_*）换新后删除，避免反复改 logo_url 灌磁盘
             if old_path and old_path.startswith("logos/cache_"):
@@ -631,7 +632,7 @@ def _replace_logo_file(obj, ext: str, data: bytes) -> str:
     """
     _clear_logo_file(obj)
     obj.logo_url = None
-    return save_unique("logos", _logo_prefix(obj), ext, data)
+    return save_unique(data_dirs.AVATARS, _logo_prefix(obj), ext, data)
 
 
 async def _upload_logo_obj(db, user, obj, file: UploadFile) -> None:
@@ -679,7 +680,7 @@ def _serve_logo_file(obj):
         raise HTTPException(404, "未上传 Logo")
     from app.core.fsutil import data_file
 
-    path = data_file(settings.DATA_DIR, obj.logo_path)
+    path = data_dirs.resolve_rel(obj.logo_path)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 文件缺失")
     from app.api.v1.auth import media_file_headers
@@ -832,7 +833,7 @@ def _store_logo_file_bytes(zf, logo_file, obj) -> None:
         img = sanitize_svg(img)
         if not img:
             return
-    obj.logo_path = save_unique("logos", _logo_prefix(obj), ext, img)
+    obj.logo_path = save_unique(data_dirs.AVATARS, _logo_prefix(obj), ext, img)
 
 
 def _process_import(db: Session, user: User, zf, manifest: dict) -> tuple[list, list]:

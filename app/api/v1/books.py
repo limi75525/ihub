@@ -22,6 +22,7 @@ from app.models.book import Book, BookChapter, BookProgress
 from app.models.transfer_item import TransferItem
 from app.models.user import User
 from app.services import book_service
+from app.core import data_dirs
 
 router = APIRouter(prefix="/books", tags=["books"])
 
@@ -144,7 +145,7 @@ def import_book(
         # 解析失败：源文件仍在文件库，条目不动，用户可直接重试或删除
         raise HTTPException(400, "书籍解析失败，请确认文件完整未损坏")
 
-    dest_dir = Path(settings.DATA_DIR) / "books"
+    dest_dir = Path(settings.DATA_DIR) / data_dirs.BOOKS
     dest_dir.mkdir(parents=True, exist_ok=True)
     book = Book(user_id=user.id, format=ext.lstrip("."), size=src.stat().st_size)
     db.add(book)
@@ -178,7 +179,7 @@ def import_book(
             except OSError:
                 pass
         try:
-            for f in (Path(settings.DATA_DIR) / "book_covers").glob(f"book_{book_id}_*"):
+            for f in (Path(settings.DATA_DIR) / data_dirs.BOOK_COVERS).glob(f"book_{book_id}_*"):
                 f.unlink(missing_ok=True)
         except OSError:
             pass
@@ -296,9 +297,12 @@ def delete_book(book_id: int, user: User = Depends(get_current_user), db: Sessio
 def _purge_book(db: Session, book: Book) -> None:
     """物理删除：书籍文件、封面、章节与进度一并清除。"""
     if book.file_path:
-        (Path(settings.DATA_DIR) / book.file_path).unlink(missing_ok=True)
-    if book.cover_path and book.cover_path.replace("\\", "/").startswith("book_covers/"):
-        (Path(settings.DATA_DIR) / book.cover_path).unlink(missing_ok=True)
+        p = data_dirs.resolve_rel(book.file_path)
+        if p:
+            p.unlink(missing_ok=True)
+    cp = data_dirs.resolve_rel(book.cover_path)
+    if cp:
+        cp.unlink(missing_ok=True)
     db.query(BookChapter).filter(BookChapter.book_id == book.id).delete(synchronize_session=False)
     db.query(BookProgress).filter(BookProgress.book_id == book.id).delete(synchronize_session=False)
     db.delete(book)
@@ -314,7 +318,7 @@ def book_file(book_id: int, user: User = Depends(get_media_user), db: Session = 
     book = _own_book(db, user, book_id)
     if not book.file_path:
         raise HTTPException(404, "书籍文件缺失")
-    p = data_file(settings.DATA_DIR, book.file_path)
+    p = data_dirs.resolve_rel(book.file_path)
     if not p or not p.is_file():
         raise HTTPException(404, "书籍文件缺失")
     return FileResponse(p, media_type=BOOK_MIME.get(p.suffix.lower(), "application/octet-stream"))
@@ -325,7 +329,7 @@ def book_cover(book_id: int, user: User = Depends(get_media_user), db: Session =
     book = _own_book(db, user, book_id)
     if not book.cover_path:
         raise HTTPException(404, "无封面")
-    p = data_file(settings.DATA_DIR, book.cover_path)
+    p = data_dirs.resolve_rel(book.cover_path)
     if not p or not p.is_file():
         raise HTTPException(404, "无封面")
     return FileResponse(p)

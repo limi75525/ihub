@@ -1,6 +1,8 @@
 """系统设置（管理员）。"""
 
 import logging
+import threading
+import time as _time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -20,6 +22,8 @@ from app.models.user import User
 from app.services.logo_urls import file_url
 from app.services.retention import get_pending_at, get_retention_days, run_retention_cleanup
 from app.services.uploads import read_limited, save_unique
+from app.core import outbound
+from app.core import data_dirs
 
 RETENTION_ALLOWED = (0, 7, 30, 180, 365)
 
@@ -110,7 +114,7 @@ def _store_login_bg(data: bytes, ext: str) -> str:
     """落盘登录背景并清在线链接（磁盘写入 + 设置写库，整体放线程池）。"""
     _clear_login_bg_file()
     set_setting("login_bg_url", "")
-    rel = save_unique("bg", "login", ext, data)
+    rel = save_unique(data_dirs.BG, "login", ext, data)
     set_setting("login_bg_path", rel)
     return rel
 
@@ -140,7 +144,7 @@ def login_bg_file():
     rel = get_setting("login_bg_path", "")
     if not rel:
         raise HTTPException(404, "未上传背景图")
-    path = data_file(cfg.DATA_DIR, rel)
+    path = data_dirs.resolve_rel(rel)
     if not path or not path.is_file():
         raise HTTPException(404, "背景图文件缺失")
     return FileResponse(path)
@@ -160,7 +164,7 @@ def set_site_title(body: SiteTitleIn, admin: User = Depends(get_current_admin)):
 def _store_site_logo(data: bytes, ext: str) -> str:
     """落盘的站点 Logo（磁盘写入 + 设置写库，整体放线程池）。"""
     _clear_site_logo_file()
-    rel = save_unique("logos", "site", ext, data)
+    rel = save_unique(data_dirs.AVATARS, "site", ext, data)
     set_setting("site_logo_path", rel)
     return rel
 
@@ -191,7 +195,7 @@ def site_logo_file():
     rel = get_setting("site_logo_path", "")
     if not rel:
         raise HTTPException(404, "未上传 Logo")
-    path = data_file(cfg.DATA_DIR, rel)
+    path = data_dirs.resolve_rel(rel)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 文件缺失")
     return FileResponse(path)
@@ -211,6 +215,22 @@ def set_image_cache(body: ImageCacheIn, admin: User = Depends(get_current_admin)
     """图片缓存开关：将站内引用的在线图片缓存到本地（功能开发中，仅先落地开关）。"""
     set_setting("image_cache_enabled", "true" if body.enabled else "false")
     return {"ok": True, "enabled": body.enabled}
+
+
+class SystemSourcesIn(BaseModel):
+    hidden: bool
+
+
+@router.get("/system-sources")
+def get_system_sources(admin: User = Depends(get_current_admin)):
+    """系统来源（种子事件等）在管理员的接入服务列表中是否隐藏。"""
+    return {"hidden": get_setting("hide_system_sources", "false") == "true"}
+
+
+@router.patch("/system-sources")
+def set_system_sources(body: SystemSourcesIn, admin: User = Depends(get_current_admin)):
+    set_setting("hide_system_sources", "true" if body.hidden else "false")
+    return {"ok": True, "hidden": body.hidden}
 
 
 class RegistrationIn(BaseModel):
@@ -372,3 +392,113 @@ def set_registration(
         raise HTTPException(400, "尚未初始化")
     set_setting("registration_open", "true" if body.open else "false")
     return {"ok": True, "registration_open": body.open}
+
+
+# ---------------- 网络（出站代理 + TMDB 地址，2026-10-25） ----------------
+
+
+class NetworkIn(BaseModel):
+    proxy: str | None = None
+    extra_domains: str | None = None
+    tmdb_api_base: str | None = None
+    tmdb_image_base: str | None = None
+
+
+@router.get("/network")
+def get_network(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    from app.core import outbound
+
+    return {
+        "proxy": get_setting_db(db, outbound.PROXY_KEY, ""),
+        "extra_domains": get_setting_db(db, outbound.EXTRA_KEY, ""),
+        "tmdb_api_base": get_setting_db(db, "video_tmdb_api_base", ""),
+        "tmdb_image_base": get_setting_db(db, "video_tmdb_image_base", ""),
+        "builtin_suffixes": list(outbound.BUILTIN_SUFFIXES),
+    }
+
+
+@router.patch("/network")
+def set_network(body: NetworkIn, admin: User = Depends(get_current_admin)):
+    from app.core import outbound
+
+    if body.proxy is not None:
+        proxy = body.proxy.strip()
+        if proxy and not proxy.lower().startswith(("http://", "https://")):
+            raise HTTPException(400, "代理地址需以 http:// 或 https:// 开头（暂不支持 socks5）")
+        set_setting(outbound.PROXY_KEY, proxy[:256])
+        logger.info("网络设置审计：user=%s op=出站代理 proxy=%s", admin.username, proxy or "(清空)")
+    if body.extra_domains is not None:
+        set_setting(outbound.EXTRA_KEY, body.extra_domains.strip()[:1024])
+    if body.tmdb_api_base is not None:
+        set_setting("video_tmdb_api_base", body.tmdb_api_base.strip()[:256])
+    if body.tmdb_image_base is not None:
+        set_setting("video_tmdb_image_base", body.tmdb_image_base.strip()[:256])
+    return {"ok": True}
+
+
+@router.post("/network/test-proxy")
+def test_proxy(admin: User = Depends(get_current_admin)):
+    """用当前出站代理拉一个轻量探测地址，验证代理可用性与延迟。"""
+    from app.core import outbound
+
+    proxy = (get_setting(outbound.PROXY_KEY, "") or "").strip()
+    if not proxy:
+        return {"ok": False, "error": "尚未配置代理地址"}
+    import urllib.request as _ureq
+
+    req = _ureq.Request("https://www.gstatic.com/generate_204", headers={"User-Agent": "iHub/1.0"})
+    t0 = _time.perf_counter()
+    try:
+        handler = _ureq.ProxyHandler({"http": proxy, "https": proxy})
+        opener = _ureq.build_opener(handler)
+        with opener.open(req, timeout=8) as resp:
+            ms = int((_time.perf_counter() - t0) * 1000)
+            return {"ok": resp.status == 204 or resp.status == 200, "ms": ms, "status": resp.status}
+    except Exception as e:
+        ms = int((_time.perf_counter() - t0) * 1000)
+        return {"ok": False, "ms": ms, "error": str(getattr(e, "reason", None) or e)}
+
+
+@router.post("/network/test-tmdb")
+def test_tmdb(admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+    """按当前网络设置实测 TMDB API 连通性（直连或走代理自动判定）。"""
+    from app.core.credential import get_credential
+    from app.services import tmdb
+
+    api_base = get_setting_db(db, "video_tmdb_api_base", "") or tmdb.API_DEFAULT
+    api_key = get_credential(db, "video_tmdb_key")
+    url = f"{api_base.rstrip('/')}/3/configuration"
+    if api_key:
+        from urllib.parse import quote
+
+        url += f"?api_key={quote(api_key, safe='')}"
+    req = tmdb.UrlRequest(url, headers={"User-Agent": tmdb.USER_AGENT, "Accept": "application/json"})
+    t0 = _time.perf_counter()
+    try:
+        opener = outbound.opener_for(url)
+        with opener.open(req, timeout=10) as resp:
+            ms = int((_time.perf_counter() - t0) * 1000)
+            return {"ok": resp.status == 200, "ms": ms, "status": resp.status}
+    except Exception as e:
+        ms = int((_time.perf_counter() - t0) * 1000)
+        return {"ok": False, "ms": ms, "error": str(getattr(e, "reason", None) or e)}
+
+
+# ---------------- 存储占用与定期清理（2026-10-25） ----------------
+
+
+@router.get("/storage")
+def storage_overview_api(admin: User = Depends(get_current_admin)):
+    from app.services import janitor
+
+    return janitor.storage_overview()
+
+
+@router.post("/storage/cleanup")
+def storage_cleanup(admin: User = Depends(get_current_admin)):
+    from app.services import janitor
+
+    if janitor.JANITOR_LOCK.locked():
+        return {"ok": False, "error": "清理正在进行中"}
+    threading.Thread(target=janitor.run_janitor, daemon=True).start()
+    return {"ok": True, "started": True}

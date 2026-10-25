@@ -21,6 +21,7 @@ from app.models.user import User
 from app.schemas.message import BatchActionIn, MessageDetailOut, MessageListOut
 from app.services.events import broker
 from app.services.logo_urls import file_url
+from app.core import data_dirs
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -415,7 +416,7 @@ def download_attachment(
     if not att.get("path"):
         raise HTTPException(404, "附件文件缺失")
     # data_file：resolve + relative_to 严格判定（防止 data 同级前缀目录如 data-evil 绕过）
-    path = data_file(settings.DATA_DIR, att["path"])
+    path = data_dirs.resolve_rel(att["path"])
     if not path or not path.is_file():
         raise HTTPException(404, "附件文件缺失")
     filename = att.get("filename") or path.name

@@ -48,6 +48,7 @@ from app.services.settings_store import get_cfg, get_cfgs, get_credential, set_c
 from app.services.upstream_http import http as _http
 from app.services.upstream_http import http_open as _http_open
 from app.services.upstream_http import proxy_stream as _proxy_stream
+from app.core import data_dirs
 
 try:
     import mutagen
@@ -80,12 +81,11 @@ def _music_source(db: Session) -> str:
 
 def _config_out(db: Session) -> dict:
     v = get_cfgs(db, (
-        "music_enabled", "music_autoplay", "music_nas_path",
+        "music_enabled", "music_nas_path",
         "music_sub_url", "music_sub_user", "music_sub_pass",
     ))
     return {
         "enabled": v.get("music_enabled", "") == "true",
-        "autoplay": v.get("music_autoplay", "") == "true",
         "source": _music_source(db),
         "nas_path": v.get("music_nas_path", ""),
         "nas_track_count": db.query(MusicTrack.id).count() if v.get("music_nas_path", "") else 0,
@@ -97,7 +97,6 @@ def _config_out(db: Session) -> dict:
 
 class MusicConfigIn(BaseModel):
     enabled: bool = False
-    autoplay: bool = False
     source: str = "none"
     nas_path: str | None = None
     sub_url: str | None = None
@@ -111,7 +110,6 @@ def get_music_config(user: User = Depends(get_current_user), db: Session = Depen
     if user.role != "admin":
         return {
             "enabled": get_cfg(db, "music_enabled") == "true",
-            "autoplay": get_cfg(db, "music_autoplay") == "true",
             "source": _music_source(db),
         }
     return _config_out(db)
@@ -122,7 +120,6 @@ def set_music_config(body: MusicConfigIn, admin: User = Depends(get_current_admi
     if body.source not in MUSIC_SOURCES:
         raise HTTPException(400, "未知的音乐源类型")
     set_setting("music_enabled", "true" if body.enabled else "false")
-    set_setting("music_autoplay", "true" if body.autoplay else "false")
     set_setting("music_source", body.source)
     if body.nas_path is not None:
         set_setting("music_nas_path", body.nas_path.strip()[:1024])
@@ -399,7 +396,7 @@ def _nas_root(db: Session) -> Path:
 
 
 def _cover_dir() -> Path:
-    d = Path(cfg.DATA_DIR) / "music_covers"
+    d = Path(cfg.DATA_DIR) / data_dirs.MUSIC_COVERS
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -549,7 +546,7 @@ def _drop_track_cover(row: MusicTrack, data: Path) -> None:
         (data / row.cover_path).unlink(missing_ok=True)
 
 
-def _run_scan(root_str: str, data_dir: str) -> None:
+def _run_scan(root_str: str, data_dir: str, trigger_user_id: int) -> None:
     root = Path(root_str).resolve()
     data = Path(data_dir)
     rescan_all = _SCAN.read().get("scanner_version") != SCANNER_VERSION
@@ -566,6 +563,15 @@ def _run_scan(root_str: str, data_dir: str) -> None:
         on_remove=lambda row: _drop_track_cover(row, data),
         done_extra={"scanner_version": SCANNER_VERSION},
     )
+    from app.services import notify_service
+
+    notify_service.background_notify_admins(
+        type="scan_done",
+        title="音乐库扫描完成",
+        body="音乐库扫描已完成，新增或更新的条目已在音乐中心可见。",
+        link="#/music",
+        dedup_key=f"scan-music:{int(time.time() // 60)}",
+    )
 
 
 @router.post("/scan")
@@ -576,7 +582,7 @@ def scan_library(admin: User = Depends(get_current_admin), db: Session = Depends
     started, state = _SCAN.begin()
     if not started:
         return {"ok": True, "started": False, "state": state}
-    threading.Thread(target=_run_scan, args=(str(root), str(Path(cfg.DATA_DIR))), daemon=True).start()
+    threading.Thread(target=_run_scan, args=(str(root), str(Path(cfg.DATA_DIR)), admin.id), daemon=True).start()
     return {"ok": True, "started": True}
 
 
@@ -1122,7 +1128,7 @@ def _pl_item_out(it: MusicPlaylistItem) -> dict:
 
 
 def _pl_cover_dir() -> Path:
-    d = Path(cfg.DATA_DIR) / "playlist_covers"
+    d = Path(cfg.DATA_DIR) / data_dirs.PLAYLIST_COVERS
     d.mkdir(parents=True, exist_ok=True)
     return d
 

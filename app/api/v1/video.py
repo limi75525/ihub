@@ -46,6 +46,7 @@ from app.services import media_scan, nfo, tmdb
 from app.services.jellyfin import VIDEO_JF
 from app.services.settings_store import get_cfg, get_cfgs, get_credential, set_credential
 from app.services.upstream_http import proxy_stream as _proxy_stream
+from app.core import data_dirs
 
 router = APIRouter(prefix="/video", tags=["video"])
 
@@ -54,7 +55,7 @@ logger = logging.getLogger(__name__)
 VIDEO_EXTS = {".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".mpg", ".mpeg", ".ts", ".flv", ".rmvb", ".rm"}
 SCAN_STATE_KEY = "video_scan_state"
 SCANNER_VERSION = 2  # 2：NFO 元数据 + TMDB 编号（升级后首扫全量重解析补齐新字段）
-ART_DIR = settings.DATA_DIR / "video_covers"  # 在线补全的海报/剧照缓存（不回写媒体目录）
+ART_DIR = settings.DATA_DIR / data_dirs.VIDEO_COVERS  # 在线补全的海报/剧照缓存（不回写媒体目录）
 ARTWORK_DELAY = 0.25  # 相邻两部影片补全之间的间隔（对上游温柔一点）
 
 # 海报/剧照探测：自身目录先试「文件名主干」变体，再试通用名；分集向剧集目录回探若干层
@@ -114,10 +115,11 @@ class VideoConfigIn(BaseModel):
 
 def _tmdb_conf(db: Session) -> tuple[str, str, str, str]:
     """(api_key, proxy, api_base, image_base)——Key 缺失时在线补全整体跳过。"""
-    v = get_cfgs(db, ("video_tmdb_proxy", "video_tmdb_api_base", "video_tmdb_image_base"))
+    v = get_cfgs(db, ("video_tmdb_api_base", "video_tmdb_image_base"))
+    # 代理不再取 video_tmdb_proxy（已废弃）：tmdb.py 按请求 URL 自动匹配全局出站代理
     return (
         get_credential(db, "video_tmdb_key"),
-        v.get("video_tmdb_proxy", ""),
+        "",
         v.get("video_tmdb_api_base", "") or tmdb.API_DEFAULT,
         v.get("video_tmdb_image_base", "") or tmdb.IMAGE_DEFAULT,
     )
@@ -398,10 +400,28 @@ def _run_scan(root_str: str) -> None:
     )
     try:
         _enrich_online_art(root)
-    except Exception:
+    except Exception as e:
         # 补全阶段的意外异常不能把状态卡在 running（否则下一次扫描会被「已在运行」拒绝）
         logger.exception("影视在线补全阶段异常")
         _SCAN.write(running=False, phase="done", finished_at=int(time.time()))
+        from app.services import notify_service
+
+        notify_service.background_notify_admins(
+            type="service_failed",
+            title="影视在线补全失败",
+            body=f"影视 TMDB 在线补全阶段异常：{str(e)[:300]}",
+            dedup_key=f"video-artwork:{int(time.time() // 86400)}",
+        )
+        return
+    from app.services import notify_service
+
+    notify_service.background_notify_admins(
+        type="scan_done",
+        title="影视库扫描完成",
+        body="影视库扫描与在线补全已完成，新增或更新的条目已在影视中心可见。",
+        link="#/video",
+        dedup_key=f"scan-video:{int(time.time() // 60)}",
+    )
 
 
 # ---------------- 在线补全（TMDB 海报/剧照：默认启用、失败静默、缓存于 data/video_covers） ----------------

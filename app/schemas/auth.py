@@ -36,6 +36,8 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=MAX_PASSWORD_BYTES)
     captcha_id: str | None = Field(default=None, max_length=64)
     captcha_code: str | None = Field(default=None, max_length=64)
+    # true 时签发 HttpOnly 长期令牌，前端不保存密码
+    remember_me: bool = False
 
 
 class ProfileUpdateIn(BaseModel):

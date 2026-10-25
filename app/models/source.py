@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -38,6 +38,11 @@ class Source(Base):
     # 排序：设置页拖拽调整，消息页右栏与接入状态卡按此顺序展示
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 系统来源（如「种子」事件来源）：普通用户不可见，管理员可见；
+    # 不参与「在线服务/接入服务」计数，也不允许删除（只能启停）。
+    is_system: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), index=True
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 来源 Logo：本地上传文件相对路径 或 在线图片 URL（二选一）
     logo_path: Mapped[str | None] = mapped_column(String(256), nullable=True)

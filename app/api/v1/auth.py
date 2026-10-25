@@ -4,7 +4,8 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.fsutil import safe_mtime
+import logging
+
 from app.core.netutil import client_ip
 from app.core.ratelimit import (
     check_captcha_allowed,
@@ -24,9 +27,16 @@ from app.core.ratelimit import (
     record_login_success,
     record_register,
 )
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import (
+    create_access_token,
+    create_remember_token,
+    decode_access_token,
+    hash_password,
+    verify_password,
+)
 
 # 时序抹平用的假哈希（随机口令生成，永不可能验证通过）
+logger = logging.getLogger(__name__)
 _DUMMY_BCRYPT_HASH = hash_password(secrets.token_urlsafe(24))
 from app.core.timeutil import as_utc
 from app.db.session import get_db
@@ -41,7 +51,8 @@ from app.schemas.auth import (
     TokenOut,
     UserOut,
 )
-from app.services.uploads import read_limited, save_unique
+from app.services.uploads import read_limited, save_bytes, save_unique
+from app.core import data_dirs
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -224,6 +235,57 @@ def _token_for(user: User, db: Session) -> TokenOut:
     )
 
 
+REMEMBER_COOKIE = "ihub_remember"
+REMEMBER_COOKIE_PATH = "/api/v1/auth"
+
+
+def _cookie_secure(request: Request) -> bool:
+    """直接 HTTPS 或可信反代声明 https 时才加 Secure；本机 HTTP 调试仍能种 Cookie。"""
+    if request.url.scheme == "https":
+        return True
+    if settings.TRUST_PROXY_HEADERS:
+        proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        return proto == "https"
+    return False
+
+
+def _set_remember_cookie(response: Response, request: Request, user: User) -> None:
+    days = max(1, int(settings.REMEMBER_ME_DAYS or 0))
+    response.set_cookie(
+        key=REMEMBER_COOKIE,
+        value=create_remember_token(user.id, user.username, user.role, user.pwd_version or 0),
+        max_age=days * 86400,
+        path=REMEMBER_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(request),
+    )
+
+
+def _clear_remember_cookie(response: Response, request: Request) -> None:
+    response.delete_cookie(
+        key=REMEMBER_COOKIE,
+        path=REMEMBER_COOKIE_PATH,
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(request),
+    )
+
+
+def _remember_payload(request: Request) -> dict | None:
+    raw = request.cookies.get(REMEMBER_COOKIE)
+    if not raw:
+        return None
+    payload = decode_access_token(raw)
+    return payload if payload and payload.get("purpose") == "remember" else None
+
+
+def _refresh_failure(request: Request) -> JSONResponse:
+    response = JSONResponse({"detail": "登录已过期，请重新登录"}, status_code=401)
+    _clear_remember_cookie(response, request)
+    return response
+
+
 def avatar_url_for(user: User) -> str | None:
     """头像地址附带文件修改时间，更换头像后 URL 变化，规避浏览器缓存旧图。"""
     if not user.avatar_path:
@@ -258,7 +320,12 @@ def _claim_first_user_slot(db: Session) -> bool:
 
 
 @router.post("/register", response_model=TokenOut)
-def register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
+def register(
+    body: RegisterIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     ip = client_ip(request)
     # 限流在前：注册要跑 bcrypt（刻意昂贵的哈希），未认证端点不能无限调用
     try:
@@ -290,11 +357,18 @@ def register(body: RegisterIn, request: Request, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(400, "用户名已被占用")
     db.refresh(user)
+    # 新账号注册不继承浏览器里上一个账号的「记住我」Cookie
+    _clear_remember_cookie(response, request)
     return _token_for(user, db)
 
 
 @router.post("/login", response_model=TokenOut)
-def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
+def login(
+    body: LoginIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     ip = client_ip(request)
     # 限流在前：被锁定的请求不消耗验证码
     try:
@@ -317,7 +391,59 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         # 禁用账号校验通过也不清除失败计数：否则可被用来刷低锁定阈值
         raise HTTPException(403, "账号已被禁用")
     record_login_success(body.username, ip)
+    # 登录提醒：与上次登录地址不同时通知本人（首次登录不提醒）
+    prev_ip = (user.last_login_ip or "").strip()
+    if prev_ip and prev_ip != ip:
+        try:
+            from app.services import notify_service
+            from datetime import datetime, timezone
+
+            local_ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+            notify_service.create(
+                db,
+                user_ids=[user.id],
+                type="login",
+                title="账号登录提醒",
+                body=f"您的账号于 {local_ts} 在新地址 {ip} 登录成功。若非本人操作，请及时修改密码。",
+                link="#/profile",
+            )
+        except Exception:
+            logger.exception("登录通知写入失败")
+    user.last_login_ip = ip[:64]
+    db.commit()
+    if body.remember_me:
+        _set_remember_cookie(response, request, user)
+    else:
+        _clear_remember_cookie(response, request)
     return _token_for(user, db)
+
+
+@router.post("/refresh", response_model=TokenOut)
+def refresh(request: Request, db: Session = Depends(get_db)):
+    """用 HttpOnly 的「记住我」Cookie 换新的短期访问令牌；密码不参与。"""
+    payload = _remember_payload(request)
+    if not payload:
+        return _refresh_failure(request)
+    try:
+        user_id = int(payload.get("sub"))
+        pwd_version = int(payload.get("pwd_version", -1))
+    except (TypeError, ValueError):
+        return _refresh_failure(request)
+    user = db.get(User, user_id)
+    if (
+        not user
+        or user.is_deleted
+        or not user.is_active
+        or pwd_version != (user.pwd_version or 0)
+    ):
+        return _refresh_failure(request)
+    return _token_for(user, db)
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response):
+    _clear_remember_cookie(response, request)
+    return {"ok": True}
 
 
 @router.get("/me", response_model=MeOut)
@@ -358,7 +484,7 @@ def _store_avatar(user: User, ext: str, data: bytes) -> str:
     if user.avatar_path:
         old = Path(settings.DATA_DIR) / user.avatar_path
         old.unlink(missing_ok=True)
-    return save_unique("avatars", f"user_{user.id}", ext, data)
+    return save_bytes(data_dirs.AVATARS, f"ihub_user_avatars_{user.id}{ext}", data)
 
 
 async def apply_avatar_upload(user: User, file: UploadFile) -> None:
@@ -395,6 +521,7 @@ async def upload_avatar(
 def change_password(
     body: PasswordChangeIn,
     request: Request,
+    response: Response,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -410,11 +537,21 @@ def change_password(
         record_login_failure(pw_key, ip)
         raise HTTPException(400, "原密码错误")
     record_login_success(pw_key, ip)
+    remember_payload = _remember_payload(request)
+    remember_same_user = False
+    if remember_payload:
+        try:
+            remember_same_user = int(remember_payload.get("sub")) == user.id
+        except (TypeError, ValueError):
+            remember_same_user = False
     user.password_hash = hash_password(body.new_password)
     # 版本 +1 使该用户所有旧 JWT 立即失效；媒体密钥同步轮换
     user.pwd_version = (user.pwd_version or 0) + 1
     rotate_media_key(user)
     db.commit()
     db.refresh(user)
+    # 改密后旧 Remember Cookie 的 pwd_version 已失效；同一浏览器需要续签一份新的
+    if remember_same_user:
+        _set_remember_cookie(response, request, user)
     # 签发新 token：前端保存后可无感继续使用
     return _token_for(user, db)

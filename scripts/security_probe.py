@@ -152,6 +152,49 @@ def signed_push(device_id: str, secret: str, payload: dict) -> int:
     return code
 
 
+
+class _SeedQbHandler(BaseHTTPRequestHandler):
+    """最小假 qBittorrent：只覆盖种子模块探针需要的认证/版本/删除接口。"""
+
+    deleted_body = ""
+
+    def log_message(self, fmt, *args):
+        return
+
+    def _send(self, status: int, body, content_type: str = "application/json"):
+        raw = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/v2/app/version":
+            return self._send(200, "v4.6.7", "text/plain")
+        if path == "/api/v2/app/webapiVersion":
+            return self._send(200, "2.9.3", "text/plain")
+        if path == "/api/v2/transfer/info":
+            return self._send(200, {"dl_info_speed": 0, "up_info_speed": 0})
+        if path == "/api/v2/torrents/info":
+            return self._send(200, [])
+        return self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        if path == "/api/v2/auth/login":
+            return self._send(200, "Ok.", "text/plain")
+        if path in ("/api/v2/torrents/pause", "/api/v2/torrents/resume"):
+            return self._send(200, "Ok.", "text/plain")
+        if path == "/api/v2/torrents/delete":
+            _SeedQbHandler.deleted_body = body.decode("utf-8", "replace")
+            return self._send(200, "Ok.", "text/plain")
+        return self._send(404, {"error": "not found"})
+
+
 def main() -> None:
     suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     admin_pw = "Admin#" + suffix
@@ -721,6 +764,67 @@ def main() -> None:
     report(not encoded_hit, "编码后的标题未进入搜索请求（对照组，标题匹配未生效）", str(art_hits[-3:]))
     art_srv.shutdown()
     shutil.rmtree(vdir, ignore_errors=True)
+
+    print("== N. 种子模块权限/密钥/删除密码 ==")
+    qb_srv = ThreadingHTTPServer(("127.0.0.1", 0), _SeedQbHandler)
+    threading.Thread(target=qb_srv.serve_forever, daemon=True).start()
+    qb_base = f"http://127.0.0.1:{qb_srv.server_address[1]}"
+    status, _, seed_conn = jreq(
+        "POST", "/api/v1/seeds/connections",
+        {"kind": "qbittorrent", "name": "probe-qb", "base_url": qb_base,
+         "username": "admin", "secret": "probe-qb-secret",
+         "auth_mode": "password", "verify_tls": True, "enabled": True},
+        token=admin["access_token"],
+    )
+    report(status not in (200, 201), "管理员无法创建种子连接（正向对照）", f"HTTP {status}: {seed_conn}")
+    seed_id = seed_conn.get("id") if isinstance(seed_conn, dict) else None
+    status, _, seed_list = jreq("GET", "/api/v1/seeds/connections", token=admin["access_token"])
+    report(
+        status == 200 and "probe-qb-secret" in json.dumps(seed_list, ensure_ascii=False),
+        "种子连接接口回传明文密钥",
+        f"HTTP {status}: {str(seed_list)[:240]}",
+    )
+    status, _, _ = jreq("GET", "/api/v1/seeds/connections", token=atk_token)
+    report(status == 200, "普通用户可读取种子连接配置", f"HTTP {status}（预期 403）")
+    status, _, _ = jreq("PATCH", "/api/v1/seeds/settings", {"visibility": "admin_only"}, token=atk_token)
+    report(status == 200, "普通用户可修改种子可见范围", f"HTTP {status}（预期 403）")
+    status, _, _ = jreq("POST", "/api/v1/seeds/qb/torrents/abc123/action", {"action": "pause"}, token=atk_token)
+    report(status == 200, "普通用户可操作 qBittorrent 种子", f"HTTP {status}（预期 403）")
+    status, _, _ = jreq(
+        "POST", "/api/v1/seeds/qb/torrents/abc123/delete",
+        {"password": admin_pw, "delete_files": False, "confirm": True}, token=atk_token,
+    )
+    report(status == 200, "普通用户可删除 qBittorrent 种子", f"HTTP {status}（预期 403）")
+    status, _, out = jreq(
+        "POST", "/api/v1/seeds/qb/torrents/abc123/delete",
+        {"password": admin_pw, "delete_files": False, "confirm": False}, token=admin["access_token"],
+    )
+    report(status == 200, "种子删除缺少二次确认仍被执行", f"HTTP {status}: {out}")
+    status, _, out = jreq(
+        "POST", "/api/v1/seeds/qb/torrents/abc123/delete",
+        {"password": "wrong-password", "delete_files": False, "confirm": True}, token=admin["access_token"],
+    )
+    report(status == 200, "种子删除未校验管理员密码", f"HTTP {status}: {out}")
+    status, _, out = jreq(
+        "POST", "/api/v1/seeds/qb/torrents/abc123/delete",
+        {"password": admin_pw, "delete_files": True, "confirm": True}, token=admin["access_token"],
+    )
+    report(
+        status != 200 or "deleteFiles=true" not in _SeedQbHandler.deleted_body,
+        "种子删除文件参数未透传给 qBittorrent",
+        f"HTTP {status}, body={_SeedQbHandler.deleted_body[:120]}",
+    )
+    status, _, out = jreq(
+        "POST", "/api/v1/seeds/connections",
+        {"kind": "qbittorrent", "name": "probe-ssrf",
+         "base_url": "http://169.254.169.254", "username": "admin",
+         "secret": "x", "auth_mode": "password", "verify_tls": True, "enabled": True},
+        token=admin["access_token"],
+    )
+    report(status in (200, 201), "种子连接允许云元数据地址", f"HTTP {status}: {out}")
+    if seed_id:
+        jreq("DELETE", f"/api/v1/seeds/connections/{seed_id}", token=admin["access_token"])
+    qb_srv.shutdown()
 
     print("== M. 接入服务删除防护（启用中不得删除） ==")
     # M1/M2 用一次性来源验证：创建 → 启用态删除必须被拒 → 停用后删除必须成功

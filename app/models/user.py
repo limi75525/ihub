@@ -21,6 +21,8 @@ class User(Base):
     signature: Mapped[str] = mapped_column(String(128), default="")
     email: Mapped[str] = mapped_column(String(128), default="")
     avatar_path: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # 上次登录 IP：与本次不同时触发登录提醒（首次登录不提醒）
+    last_login_ip: Mapped[str] = mapped_column(String(64), default="")
     role: Mapped[str] = mapped_column(String(16), default="user")  # admin / user
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # 密码版本号：改密码/管理员重置密码时 +1，使旧 JWT 全部失效（token 内携带该版本）

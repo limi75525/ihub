@@ -7,8 +7,9 @@
     # 终端 2：
     .venv/Scripts/python scripts/smoke_test.py http://127.0.0.1:18766
 
-覆盖：注册/登录、口令长度策略、设备签名推送（含重放与异常时间戳）、
-消息列表对脏数据的容忍、邮箱拉取失败回报、昵称/头像权限、限流不采信伪造头。
+覆盖：注册/登录、记住我 HttpOnly Cookie/刷新/退出、口令长度策略、设备签名推送
+（含重放与异常时间戳）、消息列表对脏数据的容忍、邮箱拉取失败回报、
+昵称/头像权限、限流不采信伪造头。
 """
 import hashlib
 import hmac
@@ -58,6 +59,32 @@ def call(method: str, path: str, body=None, token: str | None = None, headers=No
         return status, json.loads(raw)
     except ValueError:
         return status, raw
+
+
+def call_with_cookie(method: str, path: str, body=None, token: str | None = None, cookie: str = ""):
+    """返回 (status, JSON, Set-Cookie)；只用于记住我认证链路测试。"""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode()
+            status = resp.status
+            set_cookie = resp.headers.get("Set-Cookie")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        status = e.code
+        set_cookie = e.headers.get("Set-Cookie") if e.headers else None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = raw
+    return status, parsed, set_cookie or ""
 
 
 def sign(device_id: str, secret: str, ts: int, nonce: str, body: bytes,
@@ -215,6 +242,53 @@ def main() -> int:
     check("错误口令返回 401", st == 401, f"status={st}")
     st, _ = call("POST", "/api/v1/auth/login", {"username": user, "password": pwd})
     check("正确口令登录成功", st == 200, f"status={st}")
+
+    print("== 记住我 HttpOnly Cookie ==")
+    st, remember_body, remember_header = call_with_cookie(
+        "POST", "/api/v1/auth/login",
+        {"username": user, "password": pwd, "remember_me": True},
+    )
+    cookie_pair = (remember_header.split(";", 1)[0] if remember_header else "")
+    remember_token = cookie_pair.split("=", 1)[1] if "=" in cookie_pair else ""
+    check(
+        "记住我登录种 HttpOnly 30 天 Cookie",
+        st == 200
+        and remember_token
+        and "HttpOnly" in remember_header
+        and "SameSite=lax" in remember_header
+        and "Path=/api/v1/auth" in remember_header
+        and "Max-Age=2592000" in remember_header,
+        remember_header,
+    )
+    st, refresh_body, _ = call_with_cookie("POST", "/api/v1/auth/refresh", cookie=cookie_pair)
+    refreshed = refresh_body.get("access_token") if isinstance(refresh_body, dict) else ""
+    check("记住我 Cookie 可换新访问令牌", st == 200 and bool(refreshed), f"{st} {refresh_body}")
+    st, me_again = call("GET", "/api/v1/auth/me", token=refreshed)
+    check(
+        "刷新出的访问令牌可访问业务接口",
+        st == 200 and isinstance(me_again, dict) and me_again.get("username") == user,
+        f"{st} {me_again}",
+    )
+    st, _ = call("GET", "/api/v1/auth/me", token=remember_token)
+    check("记住我令牌不能直接当 Bearer 使用", st == 401, f"status={st}")
+    st, _, logout_header = call_with_cookie("POST", "/api/v1/auth/logout", cookie=cookie_pair)
+    check(
+        "退出登录清除记住我 Cookie",
+        st == 200 and "ihub_remember=" in logout_header and "Max-Age=0" in logout_header,
+        logout_header,
+    )
+    st, _, _ = call_with_cookie("POST", "/api/v1/auth/refresh")
+    check("没有记住我 Cookie 时刷新返回 401", st == 401, f"status={st}")
+    st, _, clear_header = call_with_cookie(
+        "POST", "/api/v1/auth/login",
+        {"username": user, "password": pwd, "remember_me": False},
+        cookie=cookie_pair,
+    )
+    check(
+        "不勾选记住我会清除旧 Cookie",
+        st == 200 and "ihub_remember=" in clear_header and "Max-Age=0" in clear_header,
+        clear_header,
+    )
 
     print("== 进程内直接校验 ==")
     os.environ["IHUB_DATA_DIR"] = os.path.dirname(os.path.abspath(DB))

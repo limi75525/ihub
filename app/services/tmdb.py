@@ -19,6 +19,8 @@ from urllib.parse import quote
 
 from urllib.request import Request as UrlRequest
 
+from app.core import outbound
+
 logger = logging.getLogger(__name__)
 
 ID_RE = re.compile(r"^\d{1,10}$")
@@ -33,7 +35,10 @@ API_DEFAULT = "https://api.themoviedb.org"
 IMAGE_DEFAULT = "https://image.tmdb.org"
 
 
-def _opener(proxy: str):
+def _opener(proxy: str, url: str):
+    """显式 proxy 优先（测试钩子）；否则按 URL 查全局出站代理白名单（tmdb.org 命中即走）。"""
+    if not proxy:
+        proxy = outbound.proxy_for_url(url) or ""
     if proxy:
         handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         return urllib.request.build_opener(handler)
@@ -106,7 +111,7 @@ def _api_item(api_base: str, kind: str, tmdb_id: str, api_key: str, proxy: str, 
         url += "&append_to_response=images"
     req = UrlRequest(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
-        with _opener(proxy).open(req, timeout=API_TIMEOUT) as resp:
+        with _opener(proxy, url).open(req, timeout=API_TIMEOUT) as resp:
             if resp.status != 200:
                 return None
             data = jsonlib.loads(resp.read(1_000_000))
@@ -114,6 +119,49 @@ def _api_item(api_base: str, kind: str, tmdb_id: str, api_key: str, proxy: str, 
         logger.debug("TMDB 查询失败：%s/%s", section, tmdb_id, exc_info=True)
         return None
     return data if isinstance(data, dict) else None
+
+
+def season_episodes(
+    api_base: str, api_key: str, proxy: str, image_base: str, tv_id: str, season: int
+) -> list[dict]:
+    """TMDB 剧集某季的集数列表（种子详情页的季展开用）。
+
+    返回 [{number, name, air_date, overview, still}]；失败/无 Key 返回空列表，由前端降级隐藏。
+    """
+    if not api_key or not ID_RE.match(str(tv_id) or ""):
+        return []
+    url = (
+        f"{api_base.rstrip('/')}/3/tv/{int(tv_id)}/season/{int(season)}"
+        f"?api_key={quote(api_key, safe='')}&language=zh-CN"
+    )
+    req = UrlRequest(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    try:
+        with _opener(proxy, url).open(req, timeout=API_TIMEOUT) as resp:
+            if resp.status != 200:
+                return []
+            data = jsonlib.loads(resp.read(2_000_000))
+    except Exception:  # noqa: BLE001 — 集数查询失败绝不抛出
+        logger.debug("TMDB 集数查询失败：tv=%s season=%s", tv_id, season, exc_info=True)
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[dict] = []
+    for ep in data.get("episodes") or []:
+        if not isinstance(ep, dict):
+            continue
+        still = ep.get("still_path")
+        out.append({
+            "number": ep.get("episode_number"),
+            "name": str(ep.get("name") or ""),
+            "air_date": str(ep.get("air_date") or ""),
+            "overview": str(ep.get("overview") or ""),
+            "still": (
+                f"{image_base.rstrip('/')}/t/p/w300{still}"
+                if isinstance(still, str) and still.startswith("/")
+                else ""
+            ),
+        })
+    return out
 
 
 def _download(image_base: str, size: str, path: str, art_dir: Path, stem: str, proxy: str) -> bool:
@@ -128,7 +176,7 @@ def _download(image_base: str, size: str, path: str, art_dir: Path, stem: str, p
     try:
         req = UrlRequest(url, headers={"User-Agent": USER_AGENT})
         art_dir.mkdir(parents=True, exist_ok=True)
-        with _opener(proxy).open(req, timeout=API_TIMEOUT + 15) as resp:
+        with _opener(proxy, url).open(req, timeout=API_TIMEOUT + 15) as resp:
             if resp.status != 200:
                 return False
             written = 0
@@ -150,6 +198,28 @@ def _download(image_base: str, size: str, path: str, art_dir: Path, stem: str, p
         except OSError:
             pass
         return False
+
+
+def backdrop_urls(
+    kind: str,
+    tmdb_id: str,
+    api_key: str,
+    proxy: str = "",
+    api_base: str = API_DEFAULT,
+    image_base: str = IMAGE_DEFAULT,
+    limit: int = FANART_MAX,
+) -> list[str]:
+    """只取宽幅剧照 URL（不落盘），供种子详情轮播；无 Key/失败返回空列表。"""
+    section = "movie" if kind == "movie" else "tv"
+    if not api_key or not ID_RE.match(str(tmdb_id or "")):
+        return []
+    data = _api_item(api_base, section, str(tmdb_id), api_key, proxy, with_images=True)
+    if not data:
+        return []
+    return [
+        f"{image_base.rstrip('/')}/t/p/w1280{path}"
+        for path in _pick_backdrop_paths(data, limit)
+    ]
 
 
 _ZH_LANGS = ("zh", "cn", "zh-cn", "zh-tw", "zh-hk")
@@ -306,7 +376,7 @@ def search(api_base: str, kind: str, query: str, api_key: str, proxy: str) -> li
     )
     req = UrlRequest(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
-        with _opener(proxy).open(req, timeout=API_TIMEOUT) as resp:
+        with _opener(proxy, url).open(req, timeout=API_TIMEOUT) as resp:
             if resp.status != 200:
                 return []
             data = jsonlib.loads(resp.read(1_000_000))

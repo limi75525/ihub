@@ -19,3 +19,4 @@ scripts/seed_emu_e2e.py
 scripts/seed_resume.py
 .emu-ui-data/
 .emu-dev-data/
+.seed-*

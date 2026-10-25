@@ -6,3 +6,5 @@ __pycache__
 # 开发种子脚本不入镜像
 scripts/seed_dev_data.py
 scripts/seed_resume.py
+scripts/seed_fake_test.py
+scripts/seed_ui_demo.py

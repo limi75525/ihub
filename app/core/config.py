@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     )
 
     APP_NAME: str = "iHub"
+    # 后端版本：与 Web 前端版本同步递增（发版时一起改），版本更新检查用
+    APP_VERSION: str = "1.6.6"
 
     # 数据目录：SQLite 数据库、附件、密钥都放这里，Docker 挂载卷指向它
     # 默认落在仓库内 iHub/data（与 docker-compose 的 ./data 挂载点一致）
@@ -20,6 +22,8 @@ class Settings(BaseSettings):
     # 留空则首次启动自动生成并持久化到 DATA_DIR/.secret_key
     SECRET_KEY: str = ""
     ACCESS_TOKEN_EXPIRE_DAYS: int = 7
+    # 勾选「记住我」时 HttpOnly Cookie 的有效期；到期后必须重新登录
+    REMEMBER_ME_DAYS: int = 30
 
     # sms/api 类型来源超过该分钟数无推送则视为离线
     DEVICE_OFFLINE_MINUTES: int = 10

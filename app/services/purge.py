@@ -24,6 +24,7 @@ from app.models.transfer_item import TransferItem
 from app.models.user import User
 from app.models.video_progress import VideoProgress
 from app.services.ingest_service import delete_attachments
+from app.core import data_dirs
 
 PURGE_DAYS = 30
 
@@ -32,10 +33,8 @@ def _unlink_under_data(rel: str | None) -> None:
     """删除 DATA_DIR 下的库内登记文件；带前缀与穿越校验，空/越界路径一律不动。"""
     if not rel:
         return
-    p = (Path(settings.DATA_DIR) / rel).resolve()
-    try:
-        p.relative_to(Path(settings.DATA_DIR).resolve())
-    except ValueError:
+    p = data_dirs.resolve_rel(rel)
+    if not p:
         return
     p.unlink(missing_ok=True)
 
@@ -76,7 +75,7 @@ def _purge_user_assets(db, user_id: int) -> None:
     db.query(Book).filter(Book.user_id == user_id).delete(synchronize_session=False)
     # 3) 常用导航：上传 Logo 文件 + 行（在线 logo_url 无文件）
     for l in db.query(NavLink).filter(NavLink.user_id == user_id).all():
-        if l.logo_path and l.logo_path.replace("\\", "/").startswith("nav_logos/"):
+        if l.logo_path and data_dirs.translate_rel(l.logo_path.replace("\\", "/")).startswith(data_dirs.NAV_LOGOS + "/"):
             _unlink_under_data(l.logo_path)
     db.query(NavLink).filter(NavLink.user_id == user_id).delete(synchronize_session=False)
     # 4) 音乐歌单：自定义封面 + 曲目项 + 行；听书记统计行

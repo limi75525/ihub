@@ -25,6 +25,7 @@ router = APIRouter(prefix="/transfer", tags=["transfer"])
 
 MAX_TEXT_LEN = 10_000
 from app.models.system_setting import get_int_setting
+from app.core import data_dirs
 
 ATTACH_MIN_MB, ATTACH_MAX_MB = 1, 2048
 
@@ -41,7 +42,7 @@ UPLOAD_TTL = 2 * 3600
 
 
 def _upload_tmp_root() -> Path:
-    d = Path(settings.DATA_DIR) / "transfer" / "_tmp"
+    d = Path(settings.DATA_DIR) / data_dirs.TMP
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -91,7 +92,7 @@ def _own_item(db: Session, user: User, item_id: int) -> TransferItem:
 
 
 def _safe_remove(rel_path: str):
-    path = data_file(settings.DATA_DIR, rel_path)
+    path = data_dirs.resolve_rel(rel_path)
     if path and path.is_file():
         path.unlink(missing_ok=True)
 
@@ -398,7 +399,7 @@ async def upload_files(
         raise HTTPException(400, "未选择文件")
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(400, f"一次最多上传 {MAX_BATCH_FILES} 个文件")
-    dest_dir = Path(settings.DATA_DIR) / "transfer" / str(user.id)
+    dest_dir = Path(settings.DATA_DIR) / data_dirs.TRANSFER / str(user.id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     limit = await run_in_threadpool(max_file_size)
     created: list[TransferItem] = []
@@ -622,7 +623,7 @@ def upload_finish(upload_id: str, user: User = Depends(get_current_user), db: Se
     parts = sorted(d.glob("part_*"))
     if not parts:
         raise HTTPException(400, "没有收到任何分片")
-    dest_dir = Path(settings.DATA_DIR) / "transfer" / str(user.id)
+    dest_dir = Path(settings.DATA_DIR) / data_dirs.TRANSFER / str(user.id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     filename = secrets.token_hex(8) + _safe_suffix(name)
     dest = dest_dir / filename
@@ -693,7 +694,7 @@ def get_file(
     t = db.query(TransferItem).filter(TransferItem.id == item_id, TransferItem.user_id == user.id).first()
     if not t or not t.file_path:
         raise HTTPException(404, "文件不存在")
-    path = data_file(settings.DATA_DIR, t.file_path)
+    path = data_dirs.resolve_rel(t.file_path)
     if not path or not path.is_file():
         raise HTTPException(404, "文件不存在")
     # 长缓存安全：列表/上传响应里的 url 都带 mtime 版本号（见 _item_out），内容替换 URL 即变化

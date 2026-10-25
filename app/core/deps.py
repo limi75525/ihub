@@ -36,6 +36,9 @@ def get_current_user(
     payload = decode_access_token(raw)
     if not payload:
         raise credentials_exception
+    # HttpOnly 的「记住我」令牌只能走 /auth/refresh，不能直接当 Bearer 访问业务接口
+    if payload.get("purpose") not in (None, "access"):
+        raise credentials_exception
     try:
         user_id = int(payload["sub"])
         pwd_version = int(payload.get("pwd_version", -1))

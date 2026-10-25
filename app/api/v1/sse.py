@@ -51,11 +51,16 @@ async def events(
                     evt = json.loads(payload)
                 except ValueError:
                     continue
-                # 严格按用户隔离：缺失 user_id 的事件一律不投递，避免未来新事件
-                # 漏带 user_id 时把内容广播给所有连接（跨用户泄露）
+                # 严格按用户隔离：缺失收件人的事件一律不投递，避免未来新事件
+                # 漏带收件人时把内容广播给所有连接（跨用户泄露）
                 if evt.get("audience") == "admins":
-                    # 全局事件（如容器监控事件）不带 user_id，只投递给管理员
+                    # 全局事件（如容器监控事件）不带收件人，只投递给管理员
                     if user.role != "admin":
+                        continue
+                elif isinstance(evt.get("user_ids"), list):
+                    # 多收件人提醒类事件（如 notification.new，事件本身无内容）：
+                    # 只投递给收件人列表内的用户
+                    if user.id not in evt["user_ids"]:
                         continue
                 elif evt.get("user_id") != user.id:
                     continue
