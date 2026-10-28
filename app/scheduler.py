@@ -76,6 +76,23 @@ def register_janitor_job() -> None:
     )
 
 
+def register_seed_prewarm_job() -> None:
+    """每日预热种子发现/推荐缓存（UTC 19:00 = 北京时间 03:00，与保留期清理错峰）。
+
+    MP 的推荐/探索接口自身有缓存（首次 0.5~1.5s、之后 30~40ms），但 iHub 进程内
+    缓存会过期/重启丢失，第一个访客要等十几个板块依次穿透 MP。低峰期先拉好并落盘，
+    全天首个访客也能秒开；手动刷新仍会强制回源。
+    """
+    from app.services.seed_prewarm import run_prewarm
+
+    scheduler.add_job(
+        run_prewarm,
+        CronTrigger(hour=19, minute=0),
+        id="seed_prewarm",
+        replace_existing=True,
+    )
+
+
 def register_update_check_job() -> None:
     """每日检查一次 iHub 新版本（GitHub Release），有新版通知管理员（每版本只提醒一次）。"""
     from app.services.notify_service import background_notify_admins

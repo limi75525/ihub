@@ -51,10 +51,10 @@ LICENSE               许可协议
 多架构镜像（amd64 / arm64），`latest` 跟随最新版：
 
 ```bash
-docker pull limi75525/ihub:1.6.8
+docker pull limi75525/ihub:1.6.9
 ```
 
-compose 把 `build: .` 换成 `image: limi75525/ihub:1.6.8` 即可；数据目录、反向代理与升级说明见官方文档。
+compose 把 `build: .` 换成 `image: limi75525/ihub:1.6.9` 即可；数据目录、反向代理与升级说明见官方文档。
 
 ### Docker Compose（源码构建）
 

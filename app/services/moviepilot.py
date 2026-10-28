@@ -699,15 +699,48 @@ class MpClient:
             data = data.get("items") or data.get("data") or []
         return data if isinstance(data, list) else []
 
-    def download_context(self, context: dict) -> dict:
-        """按搜索结果上下文手动添加下载（服务端保留 enclosure/Cookie）。"""
+    def download_clients(self) -> list:
+        """可用的下载器列表（MP /api/v1/download/clients）。"""
+        value = self._api("GET", "/api/v1/download/clients", timeout=DEFAULT_TIMEOUT)
+        data = unwrap_mp(value)
+        return data if isinstance(data, list) else []
+
+    def download_paths(self) -> list:
+        """下载保存目录配置（MP /api/v1/download/paths，含 name/save_path/media_type）。"""
+        value = self._api("GET", "/api/v1/download/paths", timeout=DEFAULT_TIMEOUT)
+        data = unwrap_mp(value)
+        return data if isinstance(data, list) else []
+
+    def download_context(
+        self,
+        context: dict,
+        *,
+        downloader: str = "",
+        save_path: str = "",
+        media_source: str = "",
+        media_id: str = "",
+        media_type: str = "",
+    ) -> dict:
+        """按搜索结果上下文手动添加下载（服务端保留 enclosure/Cookie）。
+
+        downloader / save_path 留空 = MP 默认下载器 / 自动匹配目录；
+        media_source + media_id 同时给出时覆盖媒体身份（MP 弹窗的高级选项）。
+        """
         torrent = context.get("torrent_info") if isinstance(context.get("torrent_info"), dict) else {}
         if not torrent.get("enclosure"):
             raise SeedError("该 PT 资源没有下载链接，可能已过期")
+        media_in = _context_media_info(context)
+        if media_type:
+            media_in["type"] = media_type
         payload = {
-            "media_in": _context_media_info(context),
+            "media_in": media_in,
             "torrent_in": torrent,
+            "downloader": downloader,
+            "save_path": save_path,
         }
+        if media_source and media_id:
+            payload["media_source"] = media_source
+            payload["media_id"] = str(media_id)
         value = self._api("POST", "/api/v1/download/", json_body=payload, timeout=SEARCH_TIMEOUT)
         if isinstance(value, dict) and value.get("success") is False:
             raise SeedError(str(value.get("message") or "MoviePilot 添加下载任务失败"))

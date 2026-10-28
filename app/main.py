@@ -21,6 +21,7 @@ from app.models.user import User
 from app.scheduler import (
     register_janitor_job,
     register_purge_job,
+    register_seed_prewarm_job,
     register_update_check_job,
     register_retention_job,
     scheduler,
@@ -318,7 +319,11 @@ def lifespan(app: FastAPI):
     register_retention_job()
     register_purge_job()
     register_janitor_job()
+    register_seed_prewarm_job()
     register_update_check_job()
+    # 进程重启后把 24h 内的发现页预热快照读回内存，首个访客无需等 MP
+    from app.services.seed_prewarm import hydrate_from_disk as _hydrate_seed_cache
+    _hydrate_seed_cache()
     run_retention_cleanup()
     purge_expired()
     scheduler.start()

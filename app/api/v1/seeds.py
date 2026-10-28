@@ -49,6 +49,7 @@ from app.services.settings_store import get_cfg, get_cfgs, get_credential
 from app.core.sqlutil import escape_like
 from app.models.video_item import VideoItem
 from app.services.seed_covers import proxy_url
+from app.services.seed_prewarm import PREWARM_TTL
 from app.services.seed_common import SeedError, normalize_base_url
 from app.services.seed_service import (
     ALL_TABS,
@@ -810,7 +811,15 @@ async def mp_download_resource(
         raise HTTPException(404, "搜索结果已过期，请重新搜索")
     conn = _mp_conn(db)
     try:
-        data = await run_in_threadpool(mp_client(conn).download_context, context)
+        data = await run_in_threadpool(
+            mp_client(conn).download_context,
+            context,
+            downloader=body.downloader,
+            save_path=body.save_path,
+            media_source=body.media_source,
+            media_id=body.media_id,
+            media_type=body.media_type,
+        )
     except SeedError as e:
         audit.warning("种子资源控制：user=%s op=mp_download result=error", admin.username)
         raise e
@@ -821,6 +830,24 @@ async def mp_download_resource(
         download_id or "-",
     )
     return {"ok": True, "download_id": download_id}
+
+
+@router.get("/mp/download-options")
+def mp_download_options(
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """确认下载弹窗的可选项：下载器列表 + 保存目录列表（MP 同源接口）。
+
+    `paths` 每项含 name/save_path/media_type；`clients` 每项含 name/type。
+    10 分钟内复用，避免每次点下载都打 MP。"""
+    conn = _mp_conn(db)
+
+    def load() -> dict:
+        client = mp_client(conn)
+        return {"clients": client.download_clients(), "paths": client.download_paths()}
+
+    return cached(conn.id, "mp:download-options", 600.0, load)
 
 
 @router.post("/mp/subscribe")
@@ -996,6 +1023,24 @@ def mp_site_icon(
     except Exception:  # noqa: BLE001 非法 data URL 按无图标处理
         raise HTTPException(404, "站点暂无图标")
     mime = header[5:].split(";", 1)[0] or "image/x-icon"
+    # ICO 大多是高分辨率位图（一张 234KB 的 222x256 很常见），直接下发又大又糊
+    #（浏览器把 ICO 缩到 16~18px 采样很粗糙）。有 Pillow 就把最大帧转成 64px PNG，
+    # 清晰度和体积都好一个量级；Pillow 不可用（理论不可能，requirements 里带）才回传原始 ICO。
+    if mime.startswith(("image/x-icon", "image/vnd.microsoft.icon", "image/ico", "image/icon")):
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(BytesIO(raw)) as img:
+                img.size
+                png = BytesIO()
+                img.thumbnail((64, 64), Image.LANCZOS)
+                img.save(png, "PNG")
+            raw = png.getvalue()
+            mime = "image/png"
+        except Exception:  # noqa: BLE001 转换失败回传原始 ICO
+            pass
     return Response(
         content=raw,
         media_type=mime,
@@ -1442,9 +1487,10 @@ def mp_discover(
         _prewarm_cover_urls(items)
         return items
 
-    # 上游每次现查 MP→TMDB/豆瓣，较慢；5 分钟内复用，种子页手动刷新带 fresh 旁路
+    # 探索首屏由每天 03:00 的预热任务填好（seed_prewarm），此后 24h 直接读本地缓存；
+    # 筛选组合/翻页是新 key，首次仍回源，之后同样复用；手动刷新带 fresh 旁路
     key = f"mp:discover:{source}:{page}:{count}:{sorted(params.items())}"
-    return {"items": cached(conn.id, key, 300.0, load, force=fresh), "page": page}
+    return {"items": cached(conn.id, key, PREWARM_TTL, load, force=fresh), "page": page}
 
 
 @router.get("/mp/recommend")
@@ -1472,9 +1518,10 @@ def mp_recommend(
         _prewarm_cover_urls(items)
         return items
 
-    # 推荐页 17 个板块并发拉取，缓存避免每次进页面都整页穿透上游
+    # 推荐页各板块由每天 03:00 的预热任务填好（seed_prewarm），此后 24h 直接读本地缓存；
+    # 手动刷新带 fresh 旁路
     key = f"mp:recommend:{source}:{media_type}:{page}:{count}"
-    return {"items": cached(conn.id, key, 300.0, load, force=fresh), "page": page}
+    return {"items": cached(conn.id, key, PREWARM_TTL, load, force=fresh), "page": page}
 
 
 @router.get("/mp/brush")

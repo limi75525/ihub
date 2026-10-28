@@ -78,6 +78,12 @@ class SubscribeSeasonIn(BaseModel):
 
 class SeedResourceActionIn(BaseModel):
     op_id: str = Field(min_length=10, max_length=128)
+    # 确认下载弹窗的可选项（留空 = MP 默认下载器 / 自动目录）
+    downloader: str = Field(default="", max_length=128)
+    save_path: str = Field(default="", max_length=1024)
+    media_source: str = Field(default="", max_length=32)
+    media_id: str = Field(default="", max_length=64)
+    media_type: str = Field(default="", max_length=16)
 
 
 class SeedAddIn(BaseModel):

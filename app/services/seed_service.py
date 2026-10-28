@@ -368,6 +368,16 @@ def cache_drop(conn_id: int, key: str) -> None:
         _CACHE.pop((conn_id, key), None)
 
 
+def cache_set(conn_id: int, key: str, value: Any, *, at: float | None = None) -> None:
+    """直接写入一条连接级缓存（预热/快照回填用；at 可指定数据产生时间）。"""
+    with _CACHE_LOCK:
+        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+            oldest = sorted(_CACHE.items(), key=lambda kv: kv[1][0])[: _CACHE_MAX_ENTRIES // 4]
+            for stale_key, _ in oldest:
+                _CACHE.pop(stale_key, None)
+        _CACHE[(conn_id, key)] = (time.time() if at is None else at, value)
+
+
 # ---- 可见范围 ----
 
 def allowed_tabs(user: User, db: Session) -> set[str]:
@@ -896,14 +906,18 @@ def normalize_mp_media_detail(item: dict) -> dict:
             })
         seasons = rows or None
 
-    # 详情背景图同样走封面代理（w1280 直连 TMDB 国内基本加载不动）；original 原图降档
-    backdrop = str(_first(item, "backdrop", "backdrop_path", "fanart", default="") or "").strip()
-    if backdrop:
-        backdrop = proxy_url(tmdb_sized(backdrop, "w1280")) or backdrop
+    # 详情背景图同样走封面代理（w1280 直连 TMDB 国内基本加载不动）；original 原图降档。
+    # backdrop_fallback = 原始直连地址：代理 502 时前端重试直连，借用浏览器侧代理/缓存
+    backdrop_raw = str(_first(item, "backdrop", "backdrop_path", "fanart", default="") or "").strip()
+    backdrop_raw = tmdb_sized(backdrop_raw, "w1280") if backdrop_raw else ""
+    proxied_backdrop = proxy_url(backdrop_raw) if backdrop_raw else None
+    backdrop = proxied_backdrop or backdrop_raw
+    backdrop_fallback = backdrop_raw if proxied_backdrop else ""
 
     return {
         **base,
         "backdrop": backdrop,
+        "backdrop_fallback": backdrop_fallback,
         "original_title": str(_first(item, "original_title", "original_name", default="") or ""),
         "en_title": str(_first(item, "en_title", default="") or ""),
         "runtime": item.get("runtime") or item.get("duration") or None,
@@ -934,6 +948,100 @@ def normalize_mp_media_detail(item: dict) -> dict:
     }
 
 
+def _int_or_zero(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+_SEASON_RE = re.compile(r"第\s*(\d+)\s*季")
+_SEASON_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*[-~至]\s*[Ss]?(\d{1,2})")
+_CN_SEASON_RANGE_RE = re.compile(r"(\d{1,2})\s*[-~至]\s*(\d{1,2})\s*季")
+_SEASON_S_RE = re.compile(r"[Ss](\d{1,2})(?!\d)")
+_SEASON_EP_RE = re.compile(r"[Ss](\d{1,2})\s*[Ee](\d{1,4})")
+_EP_RANGE_RE = re.compile(r"[Ee][Pp]?(\d{1,4})\s*[-~至]\s*[Ee]?[Pp]?(\d{1,4})")
+_EP_SINGLE_RE = re.compile(r"[Ee][Pp]?(\d{1,4})(?!\d)")
+_ALL_EP_RE = re.compile(r"全\s*(\d{1,4})\s*集")
+_CN_EP_RANGE_RE = re.compile(r"第\s*(\d{1,4})\s*[-~至]\s*(\d{1,4})\s*集")
+_CN_EP_SINGLE_RE = re.compile(r"第\s*(\d{1,4})\s*集")
+
+
+def season_label(meta: dict, title: str = "", subtitle: str = "") -> str:
+    """人读的季集标签：第1季 / 全5季 / 第1-5季 / 全20集 / 第1季 · 全20集 / 第2集。
+
+    先看标题与副标题（发布名里的 S01-05、1-5季、全20集 最可靠），再回退 MP 的 meta
+    字段——MP 会把 `S01-05` 误解析成 S01E05（begin_episode=5），不能盲信。电影返回空串。
+    """
+    text = f"{title} {subtitle}"
+    season_txt = ""
+    ep_no: int | None = None
+
+    rng = _SEASON_RANGE_RE.search(text) or _CN_SEASON_RANGE_RE.search(text)
+    se = _SEASON_EP_RE.search(text)
+    sm = _SEASON_RE.search(text) or _SEASON_S_RE.search(text)
+    season_no = int(se.group(1)) if se else int(sm.group(1)) if sm else 0
+    # 第 1 季无需强调季号（单季剧/第一季合集只显示集数）；第 2 季起必须保留季信息
+    first_season_only = not rng and season_no == 1
+    if rng and not se:
+        a, b = int(rng.group(1)), int(rng.group(2))
+        season_txt = f"第{a}-{b}季" if b > a else f"第{a}季"
+    elif se:
+        season_txt = f"第{int(se.group(1))}季"
+        ep_no = int(se.group(2))
+    elif sm:
+        season_txt = f"第{int(sm.group(1))}季"
+
+    ep_txt = ""
+    all_ep = _ALL_EP_RE.search(text)
+    cn_ep_rng = _CN_EP_RANGE_RE.search(text)
+    cn_ep_single = _CN_EP_SINGLE_RE.search(text)
+    ep_rng = _EP_RANGE_RE.search(text)
+    ep_single = _EP_SINGLE_RE.search(text)
+    if all_ep:
+        ep_txt = f"全{int(all_ep.group(1))}集"
+    elif ep_no:
+        ep_txt = f"第{ep_no}集"
+    elif cn_ep_rng:
+        ep_txt = f"第{int(cn_ep_rng.group(1))}-{int(cn_ep_rng.group(2))}集"
+    elif cn_ep_single:
+        ep_txt = f"第{int(cn_ep_single.group(1))}集"
+    elif ep_rng and "s" not in ep_rng.group(0).lower():
+        ep_txt = f"第{int(ep_rng.group(1))}-{int(ep_rng.group(2))}集"
+    elif ep_single and not season_txt:
+        ep_txt = f"第{int(ep_single.group(1))}集"
+
+    if season_txt or ep_txt:
+        if first_season_only:
+            # 第 1 季只显示集数（第30-31集 / 全20集），不重复「第1季」
+            return ep_txt or season_txt
+        return " · ".join(x for x in (season_txt, ep_txt) if x)
+
+    # 标题里没有季集信息：回退 MP 解析字段
+    begin_s = _int_or_zero(meta.get("begin_season"))
+    end_s = _int_or_zero(meta.get("end_season"))
+    total_s = _int_or_zero(meta.get("total_season"))
+    begin_ep = _int_or_zero(meta.get("begin_episode"))
+    end_ep = _int_or_zero(meta.get("end_episode"))
+    total_ep = _int_or_zero(meta.get("total_episode"))
+
+    parts: list[str] = []
+    if begin_s and end_s and end_s > begin_s:
+        parts.append(f"第{begin_s}-{end_s}季")
+    elif total_s > 1 and begin_s:
+        parts.append(f"全{total_s}季")
+    elif begin_s and total_s != 1:
+        # total_season==1 的单季剧不标「第1季」（用户视角只关心集数）
+        parts.append(f"第{begin_s}季")
+    if begin_ep and end_ep and end_ep > begin_ep:
+        parts.append(f"第{begin_ep}-{end_ep}集")
+    elif begin_ep and end_ep:
+        parts.append(f"第{begin_ep}集")
+    elif total_ep and not begin_ep:
+        parts.append(f"全{total_ep}集")
+    return " · ".join(parts)
+
+
 def normalize_mp_torrent(item: dict) -> dict:
     """兼容 MP v3 嵌套结构（meta_info/torrent_info）与旧版扁平结构。
 
@@ -958,8 +1066,23 @@ def normalize_mp_torrent(item: dict) -> dict:
     except (TypeError, ValueError):
         size = 0
     subtitle = str(meta.get("subtitle") or "")
+    media = item.get("media_info") if isinstance(item.get("media_info"), dict) else {}
+    description = str(pick("description") or subtitle)
+    # 中文名优先：站点副标题的「|」前半段通常就是「中文名 第N季 全X集」
+    # 中文名：媒体标题最干净（爱情公寓）；缺失时才用站点副标题前缀
+    cn_title = str(media.get("title") or "").strip()
+    if not cn_title and subtitle:
+        cn_title = subtitle.split("|", 1)[0].strip()
+    if not cn_title:
+        cn_title = str(meta.get("cn_name") or "")
     return {
         "title": str(pick("title") or meta.get("title") or ""),
+        "cn_title": cn_title,
+        "season_label": season_label(meta, str(pick("title") or meta.get("title") or ""), subtitle or description),
+        # 确认下载弹窗用：媒体身份（来源/ID/类型）
+        "media_source": str(media.get("media_source") or ""),
+        "media_id": str(media.get("media_id") or ""),
+        "media_type_cn": str(media.get("type") or meta.get("type") or ""),
         "site_name": str(pick("site_name")),
         "site_id": pick("site", default=None),
         "size": size,

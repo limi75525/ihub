@@ -1,0 +1,1 @@
+import{W as e,tn as t}from"./vue-router-DEBuQMrJ.js";import{_ as n}from"./index-B3UrI3qt.js";function r(){let r=t(n,null);return r===null&&e(`use-dialog`,`No outer <n-dialog-provider /> founded.`),r}export{r as t};
