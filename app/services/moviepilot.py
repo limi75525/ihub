@@ -575,6 +575,21 @@ class MpClient:
             data = data.get("items") or data.get("data") or []
         return data if isinstance(data, list) else []
 
+    def site_icon(self, site_id) -> str:
+        """站点图标：MP 返回 {icon: "data:image/...;base64,..."}，直接内联给前端。
+
+        站点从未被访问过时 MP 可能 404，按无图标处理。"""
+        try:
+            value = self._api(
+                "GET", f"/api/v1/site/icon/{quote(str(site_id), safe='')}", timeout=15
+            )
+        except SeedError:
+            return ""
+        data = unwrap_mp(value)
+        if isinstance(data, dict):
+            return str(data.get("icon") or "")
+        return ""
+
     # ---- 搜索/发现/推荐 ----
     def search_title(
         self, keyword: str, *, mtype: str | None = None, sites: str | None = None, page: int = 1
@@ -659,20 +674,24 @@ class MpClient:
         *,
         mtype: str | None = None,
         season: int | None = None,
+        sites: str | None = None,
         page: int = 1,
         count: int = 50,
     ) -> list:
         quoted = quote(str(media_id), safe="")
+        params = {
+            "media_source": media_source,
+            "mtype": mtype,
+            "season": season,
+            "page": page,
+            "count": count,
+        }
+        if sites:
+            params["sites"] = sites
         value = self._api(
             "GET",
             f"/api/v1/search/media/{quoted}",
-            params={
-                "media_source": media_source,
-                "mtype": mtype,
-                "season": season,
-                "page": page,
-                "count": count,
-            },
+            params=params,
             timeout=SEARCH_TIMEOUT,
         )
         data = unwrap_mp(value)

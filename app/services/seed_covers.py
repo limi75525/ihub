@@ -14,6 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import Request as UrlRequest
@@ -195,6 +196,68 @@ def _fetch(raw: str) -> tuple[bytes, str]:
     if kind != content_type:
         content_type = kind
     return body, content_type
+
+
+def is_cached(raw: str) -> bool:
+    """该封面是否已有未过期的磁盘缓存（预热前先查，避免无谓落锁）。"""
+    try:
+        _validate_url(raw)
+    except SeedError:
+        return False
+    key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    cached = _cache_file(key)
+    if cached is None:
+        return False
+    try:
+        return time.time() - cached.stat().st_mtime < CACHE_TTL
+    except OSError:
+        return False
+
+
+# 预热并发闸：同一时刻最多 2 个预热线程在跑，防止多个列表请求同时到达时线程翻倍
+_PREWARM_SEM = threading.Semaphore(2)
+
+
+def prewarm(urls: list[str], *, limit: int = 24, workers: int = 4) -> None:
+    """后台预热封面磁盘缓存（只拉 TMDB/豆瓣图 CDN，不涉及 MP API）。
+
+    浏览器拿到列表响应后才逐张请求封面，首屏要等代理逐张下载原图；
+    响应返回时后台先把这批图拉进磁盘缓存，浏览器请求即命中本地文件。
+    幂等：已缓存的 URL 直接跳过；失败走负缓存，不会阻塞重试。
+    """
+    todo: list[str] = []
+    seen: set[str] = set()
+    for raw in urls[: max(limit * 2, limit)]:
+        if not raw or raw in seen:
+            continue
+        seen.add(raw)
+        if not is_cached(raw):
+            todo.append(raw)
+        if len(todo) >= limit:
+            break
+    if not todo:
+        return
+
+    def run() -> None:
+        if not _PREWARM_SEM.acquire(blocking=False):
+            return
+
+        def warm_one(raw: str) -> None:
+            try:
+                get_cover(raw)
+            except Exception:  # noqa: BLE001 单张失败走负缓存即可
+                pass
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for _ in pool.map(warm_one, todo):
+                    pass
+        except Exception:  # noqa: BLE001 预热失败不影响业务
+            pass
+        finally:
+            _PREWARM_SEM.release()
+
+    threading.Thread(target=run, daemon=True, name="seed-cover-prewarm").start()
 
 
 def get_cover(raw: str) -> tuple[Path, str]:

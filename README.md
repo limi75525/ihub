@@ -46,7 +46,17 @@ LICENSE               许可协议
 
 ## 安装与使用
 
-### Docker Compose
+### 官方镜像（推荐）
+
+多架构镜像（amd64 / arm64），`latest` 跟随最新版：
+
+```bash
+docker pull limi75525/ihub:1.6.7
+```
+
+compose 把 `build: .` 换成 `image: limi75525/ihub:1.6.7` 即可；数据目录、反向代理与升级说明见官方文档。
+
+### Docker Compose（源码构建）
 
 ```bash
 git clone https://github.com/limi75525/ihub.git
@@ -60,7 +70,7 @@ docker compose up -d --build
 - 数据默认在仓库下的 `./data`；备份该目录即备份全部数据。
 - 后端必须以单 worker 运行，不要用 `--workers` 扩容。
 
-其他部署方式（官方镜像、NAS、反向代理、环境变量、升级与备份）见官方文档：
+其他部署方式（NAS 镜像包导入、反向代理、环境变量、升级与备份）见官方文档：
 
 https://ihub.olim.top/docs/
 

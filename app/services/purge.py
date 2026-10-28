@@ -19,6 +19,7 @@ from app.models.message import Message
 from app.models.music_playlist import MusicPlaylist, MusicPlaylistItem
 from app.models.music_user_stat import MusicUserStat
 from app.models.nav_link import NavLink
+from app.models.notification import Notification
 from app.models.source import Source
 from app.models.transfer_item import TransferItem
 from app.models.user import User
@@ -27,6 +28,8 @@ from app.services.ingest_service import delete_attachments
 from app.core import data_dirs
 
 PURGE_DAYS = 30
+# 系统通知保留期：顶栏铃铛只承载近期事件，超过 30 天的记录随每日清理删除
+NOTIFICATION_DAYS = 30
 
 
 def _unlink_under_data(rel: str | None) -> None:
@@ -100,11 +103,13 @@ def _purge_user_assets(db, user_id: int) -> None:
             _unlink_under_data(r.logo_path)
     db.query(LogoRule).filter(LogoRule.user_id == user_id).delete(synchronize_session=False)
     db.query(LogoGroup).filter(LogoGroup.user_id == user_id).delete(synchronize_session=False)
+    # 6) 系统通知（按用户隔离的行，随用户一并清除）
+    db.query(Notification).filter(Notification.user_id == user_id).delete(synchronize_session=False)
 
 
 def purge_expired() -> dict:
     db = SessionLocal()
-    stats = {"messages": 0, "logo_rules": 0, "sources": 0, "devices": 0, "books": 0, "users": 0}
+    stats = {"messages": 0, "logo_rules": 0, "sources": 0, "devices": 0, "books": 0, "notifications": 0, "users": 0}
     try:
         cut = datetime.now(timezone.utc) - timedelta(days=PURGE_DAYS)
 
@@ -190,6 +195,16 @@ def purge_expired() -> dict:
             db.delete(b)
             stats["books"] += 1
         db.flush()
+
+        # 4.6) 系统通知：保留 30 天，过期记录随每日清理删除（created_at 是 naive-UTC，
+        #      截断时区后再比较，避免带 +00:00 的字面量影响 SQLite 字符串比较）
+        cut_notif = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=NOTIFICATION_DAYS)
+        deleted_notifs = (
+            db.query(Notification)
+            .filter(Notification.created_at < cut_notif)
+            .delete(synchronize_session=False)
+        )
+        stats["notifications"] = deleted_notifs
 
         # 5) 用户（删头像文件 + 全部残留资源；其来源/消息/规则已先清理）
         users = (

@@ -1,10 +1,11 @@
-"""系统通知 API：顶栏铃铛的列表 / 未读数 / 已读标记。"""
+"""系统通知 API：顶栏铃铛的列表 / 未读数 / 已读标记 / 清空。"""
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user
+from app.core.timeutil import as_utc
 from app.db.session import get_db
 from app.models.notification import Notification
 from app.models.user import User
@@ -20,7 +21,8 @@ def _out(n: Notification) -> dict:
         "title": n.title,
         "body": n.body,
         "link": n.link or "",
-        "created_at": n.created_at.isoformat() if n.created_at else "",
+        # 库内是 naive-UTC：必须带 +00:00 下发，否则浏览器按本地时间解析会整体偏移
+        "created_at": as_utc(n.created_at).isoformat() if n.created_at else "",
         "read": n.read_at is not None,
     }
 
@@ -75,3 +77,18 @@ def mark_read(
         n.read_at = now
     db.commit()
     return {"ok": True, "read": len(rows)}
+
+
+@router.delete("")
+def clear_notifications(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """清空当前用户的全部系统通知（只影响本人）。"""
+    deleted = (
+        db.query(Notification)
+        .filter(Notification.user_id == user.id)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    return {"ok": True, "deleted": deleted}

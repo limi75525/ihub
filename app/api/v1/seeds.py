@@ -8,14 +8,16 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -340,7 +342,8 @@ def seed_cover(
     return FileResponse(
         path,
         media_type=media_type,
-        headers={"Cache-Control": "private, max-age=86400"},
+        # 封面地址按内容寻址（URL 哈希即缓存键），TMDB/豆瓣图极少变更，浏览器放 7 天
+        headers={"Cache-Control": "private, max-age=604800"},
     )
 
 
@@ -370,7 +373,11 @@ def seed_status(user: User = Depends(get_current_user), db: Session = Depends(ge
 
 
 @router.get("/overview")
-def seed_overview(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def seed_overview(
+    fresh: bool = Query(False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     tabs = allowed_tabs(user, db)
     if user.role != "admin" and not tabs:
         raise HTTPException(403, "当前账号没有查看种子页的权限")
@@ -381,7 +388,7 @@ def seed_overview(user: User = Depends(get_current_user), db: Session = Depends(
     if "download" in tabs:
         try:
             conn = _first_conn(db, "qbittorrent")
-            qb_data = cached(conn.id, "qb:summary", 2.0, lambda: _qb_summary(conn))
+            qb_data = cached(conn.id, "qb:summary", 2.0, lambda: _qb_summary(conn), force=fresh)
         except SeedError as e:
             errors.append(f"qBittorrent：{e.message}")
         except HTTPException:
@@ -390,7 +397,9 @@ def seed_overview(user: User = Depends(get_current_user), db: Session = Depends(
     if "subscription" in tabs or "sites" in tabs or "brush" in tabs:
         try:
             conn = _first_conn(db, "moviepilot")
-            mp_data = cached(conn.id, "mp:overview", 30.0, lambda: _mp_overview(conn, tabs, user))
+            mp_data = cached(
+                conn.id, "mp:overview", 60.0, lambda: _mp_overview(conn, tabs, user), force=fresh
+            )
         except SeedError as e:
             errors.append(f"MoviePilot：{e.message}")
         except HTTPException:
@@ -479,6 +488,7 @@ def qb_torrents(
     sort: str = "added_on",
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    fresh: bool = Query(False),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -502,7 +512,8 @@ def qb_torrents(
         conn.id,
         f"qb:list:{filter or ''}:{category or ''}:{tag or ''}",
         3.0,
-        load,
+        lambda: load(fresh),
+        force=fresh,
     )
     if q:
         keyword = q.strip().lower()
@@ -527,7 +538,7 @@ def qb_torrents(
     start = (page - 1) * page_size
     page_items = items[start : start + page_size]
     try:
-        attach_download_media(_mp_conn(db), page_items)
+        attach_download_media(_mp_conn(db), page_items, refresh=fresh)
     except HTTPException:
         # 没配 MP 时下载页仍按纯 qB 工作
         pass
@@ -842,6 +853,7 @@ def mp_subscriptions(
     type: Literal["all", "movie", "tv", "music"] = "all",
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    fresh: bool = Query(False),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -852,18 +864,76 @@ def mp_subscriptions(
         rows = mp_client(conn).subscriptions(page=page, count=page_size)
         return [normalize_mp_subscription(r) for r in rows if isinstance(r, dict)]
 
-    items = cached(conn.id, f"mp:subs:{page}:{page_size}", 30.0, load)
+    items = cached(conn.id, f"mp:subs:{page}:{page_size}", 60.0, load, force=fresh)
     if type != "all":
         items = [x for x in items if x["type"] == type]
     return {"items": items, "page": page, "page_size": page_size}
 
 
+def _site_icon_safe(client, site_id) -> str:
+    try:
+        return client.site_icon(site_id)
+    except Exception:  # noqa: BLE001 图标缺失不阻断站点列表
+        return ""
+
+
+def _site_health_map(stats: list) -> dict[str, dict]:
+    """statistic 行按域名归并 → {domain: {state, success, fail, seconds, last_visit}}。
+
+    MP v3 的 statistic 没有任何账号数据（上传/下载/比率在 v3 已移除），只有连通统计：
+    lst_state==0 表示最近一次访问成功。"""
+    out: dict[str, dict] = {}
+    for row in stats:
+        if not isinstance(row, dict) or not row.get("domain"):
+            continue
+        lst = row.get("lst_state")
+        state = "unknown" if lst is None else ("ok" if str(lst) == "0" else "fail")
+        try:
+            seconds = round(float(row.get("seconds")), 1) if row.get("seconds") is not None else None
+        except (TypeError, ValueError):
+            seconds = None
+        out[str(row["domain"]).lower()] = {
+            "state": state,
+            "success": int(row.get("success") or 0),
+            "fail": int(row.get("fail") or 0),
+            "seconds": seconds,
+            "last_visit": str(row.get("lst_mod_date") or ""),
+        }
+    return out
+
+
+def _site_brush_map(client) -> dict[int, dict]:
+    """BrushFlow 任务统计按 site_id 归并 → 每站点真实刷流数据（上传/下载/活跃/删种/做种体积）。"""
+    try:
+        brush = normalize_brush(client.brush_status())
+    except Exception:  # noqa: BLE001 插件未装/接口变化都不阻断站点列表
+        return {}
+    out: dict[int, dict] = {}
+    for task in brush.get("tasks") or []:
+        sid = task.get("site_id")
+        if sid is None:
+            continue
+        st = task.get("statistic") or {}
+        out[sid] = {
+            "uploaded": int(st.get("uploaded") or 0),
+            "downloaded": int(st.get("downloaded") or 0),
+            "active": int(st.get("active") or 0),
+            "deleted": int(st.get("deleted") or 0),
+            "seeding_size": int(task.get("seeding_size") or 0),
+        }
+    return out
+
+
 @router.get("/mp/sites")
-def mp_sites(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # 站点列表也被详情页的「选择站点搜索」弹窗使用，发现/搜索任一可见即可
+def mp_sites(
+    fresh: bool = Query(False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_tab(user, db, "sites")
     if user.role != "admin":
         tabs = allowed_tabs(user, db)
-        if not tabs & {"sites", "discover", "search"}:
+        if "sites" not in tabs:
             raise HTTPException(403, "当前账号没有查看该种子栏目的权限")
     conn = _mp_conn(db)
     # 可见范围已固定管理员（2026-10-25）：普通用户在上面的 allowed_tabs 检查已被 403 拦下
@@ -871,32 +941,162 @@ def mp_sites(user: User = Depends(get_current_user), db: Session = Depends(get_d
 
     def load() -> list[dict]:
         client = mp_client(conn)
-        return merge_mp_sites(
-            client.sites(),
-            client.site_statistics(),
-            include_account=include_account,
-        )
+        sites_raw = client.sites()
+        stats = client.site_statistics()
+        items = merge_mp_sites(sites_raw, stats, include_account=include_account)
+        health = _site_health_map(stats)
+        for site in items:
+            domain = str(site.get("domain") or "").lower()
+            site["health"] = health.get(domain) or {
+                "state": "unknown", "success": 0, "fail": 0, "seconds": None, "last_visit": "",
+            }
+        # 图标改为独立端点 /mp/site-icon/{id}（单张 ICO base64 可达 300KB，
+        # 不塞进列表 JSON，由浏览器长缓存按需加载）
+        # 管理员附带 BrushFlow 每站点真实刷流数据（MP v3 已无账号级上传/下载，别再展示假 0）
+        if include_account:
+            brush = _site_brush_map(client)
+            for site in items:
+                site["brush"] = brush.get(site.get("id"))
+        return items
 
     return cached(
         conn.id,
         f"mp:sites:{'account' if include_account else 'basic'}",
-        60.0,
+        300.0,
         load,
+        force=fresh,
     )
 
 
+@router.get("/mp/site-icon/{site_id}")
+def mp_site_icon(
+    site_id: str,
+    user: User = Depends(get_media_user),
+    db: Session = Depends(get_db),
+):
+    """站点图标（MP 的 data URL 解码为字节直出）。
+
+    img 标签带不了 Authorization，走 media_key（?token=）；单张 ICO base64 可达
+    300KB，独立端点 + 浏览器 7 天长缓存，不占站点列表 JSON。"""
+    if user.role != "admin" and not allowed_tabs(user, db) & {
+        "sites", "search", "discover", "subscription", "brush", "download",
+    }:
+        raise HTTPException(403, "当前账号没有查看该种子栏目的权限")
+    conn = _mp_conn(db)
+
+    def load() -> str:
+        return _site_icon_safe(mp_client(conn), site_id)
+
+    data_url = cached(conn.id, f"mp:site-icon:{site_id}", 86400.0, load)
+    if not data_url.startswith("data:") or "," not in data_url:
+        raise HTTPException(404, "站点暂无图标")
+    try:
+        header, b64 = data_url.split(",", 1)
+        raw = base64.b64decode(b64)
+    except Exception:  # noqa: BLE001 非法 data URL 按无图标处理
+        raise HTTPException(404, "站点暂无图标")
+    mime = header[5:].split(";", 1)[0] or "image/x-icon"
+    return Response(
+        content=raw,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=604800"},
+    )
+
+
+def _prewarm_cover_urls(items: list[dict], *, limit: int = 24) -> None:
+    """从归一化媒体列表里取封面代理地址，后台预热磁盘缓存（TMDB/豆瓣图 CDN，不碰 MP）。
+
+    浏览器拿到列表后逐张请求 /seeds/cover，首屏要等代理逐张下载原图；
+    响应返回时先拉进磁盘缓存，浏览器请求即命中本地文件，海报不再"一张张蹦"。"""
+    urls: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in ("poster", "backdrop"):
+            value = str(item.get(key) or "")
+            marker = "/api/v1/seeds/cover?url="
+            if marker in value:
+                urls.append(unquote(value.split(marker, 1)[1]))
+    if urls:
+        seed_covers.prewarm(urls, limit=limit)
+
+
 def _site_status(client) -> dict:
-    """MP 站点状态统计（total/ok），失败返回全零——搜索/资源为空时给前端可行动的提示。"""
-    info = {"total": 0, "ok": 0}
+    """搜索/资源为空时给前端的站点健康提示（total/ok/unavailable）。
+
+    MP v3 的 /api/v1/site/statistic **没有 status 字段**（旧版才有）——只有
+    domain/success/fail/lst_state 等，按 status 判定会永远得出「全部离线」的误报。
+    这版改用「任一站点最近一次访问成功」的口径：
+    - unavailable=True： statistic 拉取失败（连 MP 都不通，站点状态无从谈起）；
+    - 否则 ok = 最近一次访问成功的站点数（lst_state==0）；lst_state 缺失的老数据
+      按 fail < success*10 粗判（允许偶发失败，连续失败 10 倍才视为异常）。
+    """
+    info = {"total": 0, "ok": 0, "unavailable": False}
     try:
         stats = client.site_statistics()
         info["total"] = len(stats)
-        info["ok"] = sum(
-            1 for s in stats if isinstance(s, dict) and str(s.get("status")) == "1"
-        )
+        for s in stats:
+            if not isinstance(s, dict):
+                continue
+            lst = s.get("lst_state")
+            if lst is not None:
+                if str(lst) == "0":
+                    info["ok"] += 1
+                continue
+            # 兼容只有 success/fail 的旧结构
+            try:
+                ok_cnt = int(s.get("success") or 0)
+                bad_cnt = int(s.get("fail") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ok_cnt > 0 and bad_cnt < ok_cnt * 10:
+                info["ok"] += 1
     except Exception:
-        pass
+        # 连 statistic 都拉不到：MP 本体不可达，给前端明确的「状态未知」标记
+        info["unavailable"] = True
     return info
+
+
+_MEDIA_TYPE_CN = {"movie": "电影", "tv": "电视剧", "music": "音乐"}
+
+
+def _title_key(value: str) -> str:
+    """标题比对键：去空白与常见分隔符、忽略大小写。"""
+    return re.sub(r"[\s·・\-_:：,，.。'’\"“”]+", "", str(value or "")).lower()
+
+
+def _resolve_media(client, keyword: str, type_cn: str | None) -> dict | None:
+    """关键词 → 精确同名的媒体（MP 资源搜索的第一步）。
+
+    站点资源往往只索引英文名/别名（如爱情公寓 → Ipartment / Ai Qing Gong Yu），
+    纯中文关键词走 /search/title 搜不到。MP 搜索页的做法是先解析 TMDB 媒体、
+    再按媒体 ID 搜站点。这里只认同名（宁缺毋滥）：搜发行组、分辨率等非媒体
+    关键词解析不出来，回退纯关键词搜索。
+    """
+    try:
+        medias = client.media_search(keyword, count=50)
+    except SeedError:
+        return None
+    key = _title_key(keyword)
+    if not key:
+        return None
+    for m in medias:
+        if not isinstance(m, dict):
+            continue
+        if type_cn and str(m.get("type") or "") != type_cn:
+            continue
+        if not m.get("media_id") and not m.get("tmdb_id"):
+            continue
+        names = (
+            m.get("title"),
+            m.get("en_title"),
+            m.get("hk_title"),
+            m.get("tw_title"),
+            m.get("sg_title"),
+        )
+        if any(_title_key(n) == key for n in names if n):
+            return m
+    return None
 
 
 @router.get("/mp/search")
@@ -915,7 +1115,25 @@ def mp_search(
         raise HTTPException(429, str(e))
     conn = _mp_conn(db)
     client = mp_client(conn)
-    rows = client.search_title(q, mtype=type, sites=sites, page=page)
+    type_cn = _MEDIA_TYPE_CN.get(type or "", "")
+    rows: list = []
+    # 与 MP 搜索页同序：先解析媒体，按媒体 ID（含中英文别名）搜站点；
+    # 解析不出同名媒体（或该媒体无资源）时回退纯关键词搜索。
+    media = _resolve_media(client, q, type_cn) if type != "music" else None
+    if media:
+        try:
+            rows = client.search_torrents(
+                media.get("media_id") or media.get("tmdb_id"),
+                str(media.get("media_source") or "themoviedb"),
+                mtype=str(media.get("type") or type),
+                sites=sites,
+                page=page,
+                count=100 if page == 1 else 50,
+            )
+        except SeedError:
+            rows = []
+    if not rows:
+        rows = client.search_title(q, mtype=type, sites=sites, page=page)
     # 搜索为空时给出可行动的原因：MP 站点全离线（Cookie 失效/网络不通）是常见根因
     sites_info = _site_status(client) if not rows else {"total": 0, "ok": 0}
     return {"items": _search_items(rows, user), "page": page, "sites": sites_info}
@@ -943,36 +1161,50 @@ def mp_episodes(
     image_base = get_cfg(db, "video_tmdb_image_base") or tmdb.IMAGE_DEFAULT
     try:
         conn = _mp_conn(db)
-        for ep in mp_client(conn).episodes(tmdb_id, season) or []:
-            if not isinstance(ep, dict):
-                continue
-            still = ep.get("still_path")
-            items.append({
-                "number": ep.get("episode_number"),
-                "name": str(ep.get("name") or ""),
-                "air_date": str(ep.get("air_date") or ""),
-                "overview": str(ep.get("overview") or ""),
-                "still": (
-                    f"{image_base.rstrip('/')}/t/p/w300{still}"
-                    if isinstance(still, str) and still.startswith("/")
-                    else ""
-                ),
-            })
-    except (HTTPException, SeedError):
-        items = []
-    if not items:
-        api_key = get_credential(db, "video_tmdb_key")
-        if api_key:
-            api_base = get_cfg(db, "video_tmdb_api_base") or tmdb.API_DEFAULT
-            proxy = get_cfg(db, "video_tmdb_proxy")
-            items = tmdb.season_episodes(
-                api_base, api_key, proxy, image_base, tmdb_id, season,
-            )
-    # 剧照统一走封面代理（TMDB 图直连慢），代理不了的域名回退原始地址
-    for ep in items:
-        still = ep.get("still")
-        if still:
-            ep["still"] = proxy_url(still) or still
+    except HTTPException:
+        conn = None
+
+    def load_episodes() -> list[dict]:
+        """MP 某季集数 → 失败回退 TMDB 直查；剧照统一改写封面代理地址。"""
+        found: list[dict] = []
+        if conn is not None:
+            try:
+                for ep in mp_client(conn).episodes(tmdb_id, season) or []:
+                    if not isinstance(ep, dict):
+                        continue
+                    still = ep.get("still_path")
+                    found.append({
+                        "number": ep.get("episode_number"),
+                        "name": str(ep.get("name") or ""),
+                        "air_date": str(ep.get("air_date") or ""),
+                        "overview": str(ep.get("overview") or ""),
+                        "still": (
+                            f"{image_base.rstrip('/')}/t/p/w300{still}"
+                            if isinstance(still, str) and still.startswith("/")
+                            else ""
+                        ),
+                    })
+            except (HTTPException, SeedError):
+                found = []
+        if not found:
+            api_key = get_credential(db, "video_tmdb_key")
+            if api_key:
+                api_base = get_cfg(db, "video_tmdb_api_base") or tmdb.API_DEFAULT
+                proxy = get_cfg(db, "video_tmdb_proxy")
+                found = tmdb.season_episodes(
+                    api_base, api_key, proxy, image_base, tmdb_id, season,
+                )
+        for ep in found:
+            still = ep.get("still")
+            if still:
+                ep["still"] = proxy_url(still) or still
+        return found
+
+    # MP/TMDB 的季集数短期内不变，24h 缓存；详情页反复展开季不再每次穿透
+    if conn is not None:
+        items = cached(conn.id, f"mp:episodes:{tmdb_id}:{season}", 86400.0, load_episodes)
+    else:
+        items = load_episodes()
     # 绿联/本地影视库的已入库集号：按剧名（中文原名兜底）匹配剧集条目
     exists_numbers: list[int] = []
     if title.strip() and get_cfg(db, "video_enabled") == "true":
@@ -1039,8 +1271,8 @@ def mp_subscribe_state(
     def load() -> list:
         return mp_client(conn).subscriptions() or []
 
-    # 详情页每次挂载都查订阅状态；订阅列表 2 分钟内复用，写订阅时 cache_drop 失效
-    rows = cached(conn.id, "mp:subscribe-rows", 120.0, load)
+    # 详情页每次挂载都查订阅状态；订阅列表 5 分钟内复用，写订阅时 cache_drop 失效
+    rows = cached(conn.id, "mp:subscribe-rows", 300.0, load)
     seasons = sorted({
         int(x.get("season") or 0)
         for x in rows
@@ -1106,9 +1338,10 @@ def mp_media_detail_endpoint(
         raw = mp_client(conn).media_detail(media_id, media_source, zh_type)
         return normalize_mp_media_detail(raw)
 
-    # MP 电视剧首查会现拉 TMDB 的季/演职员（可达十几秒）；详情 10 分钟内直接复用
+    # MP 电视剧首查会现拉 TMDB 的季/演职员（可达十几秒）；详情 24h 内直接复用
+    # （前端还有会话级缓存，这里兜底跨会话/重启前的重复拉取）
     key = f"mp:media-detail:{media_source}:{media_id}:{zh_type}"
-    return {"detail": cached(conn.id, key, 600.0, load)}
+    return {"detail": cached(conn.id, key, 86400.0, load)}
 
 
 @router.get("/mp/media")
@@ -1128,10 +1361,10 @@ def mp_media_search(
         raise HTTPException(429, str(e))
     conn = _mp_conn(db)
     source_list = [x.strip() for x in (sources or "").split(",") if x.strip()]
-    rows = mp_client(conn).media_search(
+    items = [normalize_mp_media(r) for r in mp_client(conn).media_search(
         q, mtype=type, sources=source_list or None, page=page, count=count
-    )
-    items = [normalize_mp_media(r) for r in rows if isinstance(r, dict)]
+    ) if isinstance(r, dict)]
+    _prewarm_cover_urls(items)
     if type:
         items = [x for x in items if x.get("type") == type]
     seen = set()
@@ -1205,7 +1438,9 @@ def mp_discover(
 
     def load() -> list:
         rows = mp_client(conn).discover_explore(source, page=page, count=count, params=params)
-        return [normalize_mp_media(r) for r in rows if isinstance(r, dict)]
+        items = [normalize_mp_media(r) for r in rows if isinstance(r, dict)]
+        _prewarm_cover_urls(items)
+        return items
 
     # 上游每次现查 MP→TMDB/豆瓣，较慢；5 分钟内复用，种子页手动刷新带 fresh 旁路
     key = f"mp:discover:{source}:{page}:{count}:{sorted(params.items())}"
@@ -1233,7 +1468,9 @@ def mp_recommend(
             rows = client.recommend(
                 source=source, media_type=media_type, page=page, count=count
             )
-        return [normalize_mp_media(r) for r in rows if isinstance(r, dict)]
+        items = [normalize_mp_media(r) for r in rows if isinstance(r, dict)]
+        _prewarm_cover_urls(items)
+        return items
 
     # 推荐页 17 个板块并发拉取，缓存避免每次进页面都整页穿透上游
     key = f"mp:recommend:{source}:{media_type}:{page}:{count}"
@@ -1241,11 +1478,17 @@ def mp_recommend(
 
 
 @router.get("/mp/brush")
-def mp_brush(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def mp_brush(
+    fresh: bool = Query(False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     require_tab(user, db, "brush")
     conn = _mp_conn(db)
     try:
-        status = cached(conn.id, "mp:brush", 15.0, lambda: mp_client(conn).brush_status())
+        status = cached(
+            conn.id, "mp:brush", 60.0, lambda: mp_client(conn).brush_status(), force=fresh
+        )
         return normalize_brush(status)
     except SeedError as e:
         if e.status_code == 404:

@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -261,9 +260,13 @@ def _reset_stale_scans() -> None:
         reset_stale_scan(state_key, label)
 
 
-@asynccontextmanager
-async def _cleanup_seed_system_sources() -> None:
-    """删除历史「种子」系统来源及其事件消息（系统通知已接管，接入服务不再展示）。"""
+def _cleanup_seed_system_sources() -> None:
+    """删除历史「种子」系统来源及其事件消息（系统通知已接管，接入服务不再展示）。
+
+    注意：这里必须是普通函数——曾误加 @asynccontextmanager，调用出来只是个
+    context manager 对象、函数体从不执行，导致旧库里的「种子」系统来源一直
+    留在 接入服务 里且界面不给删除按钮。
+    """
     from app.models.message import Message
 
     db = SessionLocal()

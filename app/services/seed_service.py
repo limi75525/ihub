@@ -38,19 +38,20 @@ _CLIENTS: dict[int, tuple[str, Any]] = {}
 _CLIENTS_LOCK = threading.Lock()
 
 # qB 任务 hash -> MP 下载历史里的媒体摘要；只在种子下载页使用。
-_DOWNLOAD_META_TTL = 60.0
-_DOWNLOAD_META_PAGES = 10
+# 首次进入下载页拉一次；24 小时内轮询直接用缓存，过期或手动刷新（fresh）才重拉。
+_DOWNLOAD_META_TTL = 24 * 3600
+_DOWNLOAD_META_PAGES = 3
 _DOWNLOAD_META_COUNT = 200
 _DOWNLOAD_META: dict[int, tuple[float, dict[str, dict]]] = {}
 _DOWNLOAD_META_LOCK = threading.Lock()
-# MP 整理历史里的封面：刷流种子没有下载历史，转媒体成功后从这里补封面。
-_TRANSFER_META_TTL = 60.0
-_TRANSFER_META_PAGES = 5
+# MP 整理历史里的封面：刷流种子没有下载历史，转媒体成功后从这里补封面（同样 24h）。
+_TRANSFER_META_TTL = 24 * 3600
+_TRANSFER_META_PAGES = 2
 _TRANSFER_META_COUNT = 200
 _TRANSFER_META: dict[int, tuple[float, list[dict]]] = {}
 _TRANSFER_META_LOCK = threading.Lock()
-# 详情抽屉的媒体元数据（标题/封面/宽幅背景），按种子 hash 缓存，打开抽屉时才查。
-_DETAIL_MEDIA_TTL = 300.0
+# 详情抽屉的媒体元数据（标题/封面/宽幅背景），按种子 hash 缓存；静态信息，长缓存。
+_DETAIL_MEDIA_TTL = 24 * 3600
 _DETAIL_MEDIA: dict[tuple[int, str], tuple[float, dict]] = {}
 _DETAIL_MEDIA_LOCK = threading.Lock()
 _HISTORY_SCAN_PAGES = 5
@@ -126,11 +127,14 @@ def mp_client(conn: SeedConnection, *, fresh: bool = False) -> MpClient:
         return client
 
 
-def attach_download_media(conn: SeedConnection, items: list[dict]) -> None:
+def attach_download_media(conn: SeedConnection, items: list[dict], *, refresh: bool = False) -> None:
     """给 qB 任务补 MP 下载历史里的媒体摘要（海报/媒体名/年份/站点）。
 
     历史只覆盖经过 MP 下载链的任务；刷流、辅种等直接写下载器的任务没有记录，
     前端会回退到首字渐变占位。任何 MP 异常都不能影响 qB 列表本身。
+
+    **24 小时缓存**：首次进入下载页/每日过期后拉一次，5 秒轮询直接用缓存、不再打 MP；
+    手动刷新（refresh=True）立即重拉。新任务的封面可能要到下次刷新才出现。
     """
     hashes = {
         str(item.get("hash") or "").lower()
@@ -142,15 +146,16 @@ def attach_download_media(conn: SeedConnection, items: list[dict]) -> None:
     now = time.time()
     with _DOWNLOAD_META_LOCK:
         cached = _DOWNLOAD_META.get(conn.id)
-        if cached and now - cached[0] < _DOWNLOAD_META_TTL:
-            mapping = cached[1]
-        else:
-            mapping = None
-            previous = cached[1] if cached else {}
+    if not refresh and cached is not None and now - cached[0] < _DOWNLOAD_META_TTL:
+        mapping = cached[1]
+    else:
+        previous = cached[1] if cached else {}
+        mapping = None
 
     if mapping is None:
         fresh: dict[str, dict] = {}
         try:
+            logger.info("种子下载页：拉取 MP 下载历史（%s 页）补全封面", _DOWNLOAD_META_PAGES)
             client = mp_client(conn)
             for page in range(1, _DOWNLOAD_META_PAGES + 1):
                 rows = client.download_history(page=page, count=_DOWNLOAD_META_COUNT)
@@ -204,15 +209,16 @@ def attach_download_media(conn: SeedConnection, items: list[dict]) -> None:
     now = time.time()
     with _TRANSFER_META_LOCK:
         cached = _TRANSFER_META.get(conn.id)
-        if cached and now - cached[0] < _TRANSFER_META_TTL:
-            transfer_entries = cached[1]
-        else:
-            transfer_entries = None
+    if not refresh and cached is not None and now - cached[0] < _TRANSFER_META_TTL:
+        transfer_entries = cached[1]
+    else:
+        transfer_entries = None
     if transfer_entries is None:
         previous = cached[1] if cached else []
         fresh_entries: list[dict] = []
         seen: set[tuple[str, str]] = set()
         try:
+            logger.info("种子下载页：拉取 MP 整理历史（%s 页）补全转媒体封面", _TRANSFER_META_PAGES)
             client = mp_client(conn)
             for page in range(1, _TRANSFER_META_PAGES + 1):
                 rows = client.transfer_history(page=page, count=_TRANSFER_META_COUNT)
@@ -312,24 +318,48 @@ def clear_all_cache() -> None:
 
 # media-detail 这类按媒体 id 展开的 key 无界，满员时按写入时间淘汰最旧的四分之一
 _CACHE_MAX_ENTRIES = 800
+# 同 key 单飞锁：缓存过期瞬间多个页面/多个请求同时打进来时，只放一个请求上游，
+# 其余等在锁上拿刚写入的结果（MoviePilot 在 NAS 上并发一多就拒绝连接，不能让它吃并发陡峰）。
+_CACHE_LOCKS: dict[tuple[int, str], threading.RLock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_key_lock(cache_key: tuple[int, str]) -> threading.RLock:
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.RLock()
+            _CACHE_LOCKS[cache_key] = lock
+        return lock
 
 
 def cached(conn_id: int, key: str, ttl: float, loader, *, force: bool = False) -> Any:
-    """连接级内存缓存；force=True 跳过读取但仍回写（种子页手动刷新的旁路）。"""
-    now = time.time()
+    """连接级内存缓存；force=True 跳过读取但仍回写（种子页手动刷新的旁路）。
+
+    同一 key 的并发未命中会串行化：第一个请求回源，其余等它写缓存后直接复用，
+    避免「缓存刚过期时 N 个请求一起穿透上游」。force=True 仍会回源，但同样排队。
+    """
+    cache_key = (conn_id, key)
     if not force:
         with _CACHE_LOCK:
-            hit = _CACHE.get((conn_id, key))
-            if hit and now - hit[0] < ttl:
+            hit = _CACHE.get(cache_key)
+            if hit and time.time() - hit[0] < ttl:
                 return hit[1]
-    value = loader()
-    with _CACHE_LOCK:
-        if len(_CACHE) >= _CACHE_MAX_ENTRIES:
-            oldest = sorted(_CACHE.items(), key=lambda kv: kv[1][0])[: _CACHE_MAX_ENTRIES // 4]
-            for stale_key, _ in oldest:
-                _CACHE.pop(stale_key, None)
-        _CACHE[(conn_id, key)] = (time.time(), value)
-    return value
+    with _cache_key_lock(cache_key):
+        if not force:
+            # 等锁期间可能已经被别的线程刷新过，二次确认避免重复回源
+            with _CACHE_LOCK:
+                hit = _CACHE.get(cache_key)
+                if hit and time.time() - hit[0] < ttl:
+                    return hit[1]
+        value = loader()
+        with _CACHE_LOCK:
+            if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+                oldest = sorted(_CACHE.items(), key=lambda kv: kv[1][0])[: _CACHE_MAX_ENTRIES // 4]
+                for stale_key, _ in oldest:
+                    _CACHE.pop(stale_key, None)
+            _CACHE[cache_key] = (time.time(), value)
+        return value
 
 
 def cache_drop(conn_id: int, key: str) -> None:
@@ -716,6 +746,22 @@ def merge_mp_sites(sites: list, stats: list, *, include_account: bool = True) ->
     return out
 
 
+_TMDB_IMG_RE = re.compile(r"^(https?://image\.tmdb\.org/t/p/)([^/]+)/(.+)$")
+
+
+def tmdb_sized(url: str, size: str) -> str:
+    """把 TMDB 图片 URL 的尺寸段换成指定档位（original → w342/w780/w1280）。
+
+    MP 下发的 TMDB 海报/背景全是 original 原图（单张可达 1MB+），发现页几十张
+    卡片首屏经代理逐张下载原图是「海报加载不出来」的主因；列表场景用小尺寸，
+    非_TMDB 地址原样返回。
+    """
+    m = _TMDB_IMG_RE.match(str(url or "").strip())
+    if not m or m.group(2) == size:
+        return url
+    return f"{m.group(1)}{size}/{m.group(3)}"
+
+
 def normalize_mp_media(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -728,7 +774,8 @@ def normalize_mp_media(item: dict) -> dict:
         poster = _first(item["images"], "poster", "cover", default="")
     poster = str(poster or "").strip()
     # 海报统一走封面代理（磁盘缓存 + 豆瓣 Referer，浏览器不再直连境外图床）；
-    # 白名单外的地址代理不了，原样下发由浏览器直连
+    # TMDB original 原图降到 w342（卡片实际显示宽度 ≤300px），白名单外的地址代理不了，原样下发由浏览器直连
+    poster = tmdb_sized(poster, "w342")
     proxied = proxy_url(poster) if poster else None
     return {
         "media_id": str(_first(item, "media_id", "id", "tmdb_id", "douban_id", default="")),
@@ -849,10 +896,10 @@ def normalize_mp_media_detail(item: dict) -> dict:
             })
         seasons = rows or None
 
-    # 详情背景图同样走封面代理（w1280 直连 TMDB 国内基本加载不动）
+    # 详情背景图同样走封面代理（w1280 直连 TMDB 国内基本加载不动）；original 原图降档
     backdrop = str(_first(item, "backdrop", "backdrop_path", "fanart", default="") or "").strip()
     if backdrop:
-        backdrop = proxy_url(backdrop) or backdrop
+        backdrop = proxy_url(tmdb_sized(backdrop, "w1280")) or backdrop
 
     return {
         **base,

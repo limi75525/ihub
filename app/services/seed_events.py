@@ -35,9 +35,11 @@ _LOCK = threading.Lock()
 _LAST_QB: dict[int, float] = {}
 _LAST_MP: dict[int, float] = {}
 
-# 测试/联调可缩短间隔；生产默认 15s / 60s
+# 测试/联调可缩短间隔；生产默认 QB 15s / MP 300s。
+# MP 轮询是常驻后台线程（页面不开也在跑），间隔放宽到 5 分钟，避免持续给
+# 本来就吃力的 MP 增加请求；订阅/签到通知晚几分钟到达是可接受的代价。
 QB_INTERVAL = max(2, int(os.getenv("IHUB_SEED_QB_INTERVAL", "15")))
-MP_INTERVAL = max(2, int(os.getenv("IHUB_SEED_MP_INTERVAL", "60")))
+MP_INTERVAL = max(2, int(os.getenv("IHUB_SEED_MP_INTERVAL", "300")))
 LOOP_SECONDS = max(1, int(os.getenv("IHUB_SEED_LOOP_SECONDS", "5")))
 
 _QB_BAD_STATES = {
@@ -329,6 +331,22 @@ def start_worker() -> None:
     with _LOCK:
         if _THREAD and _THREAD.is_alive():
             return
+        # 首次启动不要在页面首载的同一波里再打 MP 通知接口：
+        # 先把已启用的 MP 连接记为「刚轮询过」，第一次通知轮询推迟到 MP_INTERVAL（默认 5 分钟）。
+        db = SessionLocal()
+        try:
+            now = time.monotonic()
+            for (conn_id,) in (
+                db.query(SeedConnection.id)
+                .filter(
+                    SeedConnection.kind == "moviepilot",
+                    SeedConnection.enabled.is_(True),
+                )
+                .all()
+            ):
+                _LAST_MP.setdefault(conn_id, now)
+        finally:
+            db.close()
         _STOP.clear()
         _THREAD = threading.Thread(target=_loop, name="ihub-seed-events", daemon=True)
         _THREAD.start()

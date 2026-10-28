@@ -209,20 +209,34 @@ def _run_janitor_locked(detail: dict) -> dict:
                 if _conn is not None:
                     _stats = mp_client(_conn).site_statistics()
                     _total = len(_stats)
-                    _ok = sum(
-                        1
-                        for s in _stats
-                        if isinstance(s, dict) and str(s.get("status")) == "1"
-                    )
+                    # 与 seeds._site_status 同口径：v3 的 statistic 没有 status 字段，
+                    # 改用「最近一次访问成功（lst_state==0）」判定；缺 lst_state 的老数据
+                    # 按 fail < success*10 粗判。之前按 status 判会永远 0/全离线误报。
+                    _ok = 0
+                    for s in _stats:
+                        if not isinstance(s, dict):
+                            continue
+                        lst = s.get("lst_state")
+                        if lst is not None:
+                            if str(lst) == "0":
+                                _ok += 1
+                            continue
+                        try:
+                            ok_cnt = int(s.get("success") or 0)
+                            bad_cnt = int(s.get("fail") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if ok_cnt > 0 and bad_cnt < ok_cnt * 10:
+                            _ok += 1
                     if _total > 0 and _ok == 0:
                         from app.services import notify_service
 
                         notify_service.notify_admins(
                             _db2,
                             type="site_offline",
-                            title="PT 站点全部离线",
+                            title="PT 站点访问异常",
                             body=(
-                                f"MoviePilot 的 {_total} 个站点全部离线，搜索与刷流不可用。"
+                                f"MoviePilot 的 {_total} 个站点最近一次访问全部失败，搜索与刷流可能不可用。"
                                 "请检查站点 Cookie 有效性与网络可达性。"
                             ),
                             link="#/seeds?tab=sites",
