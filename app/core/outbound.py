@@ -22,8 +22,12 @@ PROXY_KEY = "network_proxy"
 EXTRA_KEY = "network_proxy_extra_domains"
 
 # 内置白名单：host 等于后缀或以「.后缀」结尾即命中
+# ⚠️ TMDB 有两个域名：API/网页是 themoviedb.org，**图片 CDN 是 image.tmdb.org（tmdb.org）**——
+# 只写 themoviedb.org 会让所有 TMDB 海报/剧照绕过代理直连（国内被墙 → 502/超时，
+# 表现为「代理配了但封面加载不出来」）。两个都要在。
 BUILTIN_SUFFIXES: tuple[str, ...] = (
     "themoviedb.org",
+    "tmdb.org",
     "bgm.tv",
     "anilist.co",
     "media-amazon.com",
