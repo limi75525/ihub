@@ -63,7 +63,7 @@ def _purge_user_assets(db, user_id: int) -> None:
     全部残留——被删用户的私有数据长期躺在磁盘上，属隐私残留与存储滥用。
     """
     # 1) 快传/文件库：整目录 + 行
-    _rmdir_under_data(f"transfer/{user_id}")
+    _rmdir_under_data(f"{data_dirs.TRANSFER}/{user_id}")
     db.query(TransferItem).filter(TransferItem.user_id == user_id).delete(synchronize_session=False)
     # 2) 书籍：原文件 + 封面 + 章节/进度行
     book_ids = [b.id for b in db.query(Book.id).filter(Book.user_id == user_id).all()]
@@ -83,7 +83,7 @@ def _purge_user_assets(db, user_id: int) -> None:
     db.query(NavLink).filter(NavLink.user_id == user_id).delete(synchronize_session=False)
     # 4) 音乐歌单：自定义封面 + 曲目项 + 行；听书记统计行
     for p in db.query(MusicPlaylist).filter(MusicPlaylist.user_id == user_id).all():
-        if p.cover_path and p.cover_path.replace("\\", "/").startswith("playlist_covers/"):
+        if p.cover_path and data_dirs.translate_rel(p.cover_path.replace("\\", "/")).startswith(data_dirs.PLAYLIST_COVERS + "/"):
             _unlink_under_data(p.cover_path)
         db.query(MusicPlaylistItem).filter(MusicPlaylistItem.playlist_id == p.id).delete(
             synchronize_session=False
@@ -96,10 +96,10 @@ def _purge_user_assets(db, user_id: int) -> None:
     from app.models.logo_group import LogoGroup
 
     for g in db.query(LogoGroup).filter(LogoGroup.user_id == user_id).all():
-        if g.logo_path and g.logo_path.replace("\\", "/").startswith("logos/"):
+        if g.logo_path and data_dirs.translate_rel(g.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
             _unlink_under_data(g.logo_path)
     for r in db.query(LogoRule).filter(LogoRule.user_id == user_id).all():
-        if r.logo_path and r.logo_path.replace("\\", "/").startswith("logos/"):
+        if r.logo_path and data_dirs.translate_rel(r.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
             _unlink_under_data(r.logo_path)
     db.query(LogoRule).filter(LogoRule.user_id == user_id).delete(synchronize_session=False)
     db.query(LogoGroup).filter(LogoGroup.user_id == user_id).delete(synchronize_session=False)
@@ -133,7 +133,7 @@ def purge_expired() -> dict:
             .all()
         )
         for r in rules:
-            if r.logo_path and r.logo_path.replace("\\", "/").startswith("logos/"):
+            if r.logo_path and data_dirs.translate_rel(r.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
                 _unlink_under_data(r.logo_path)
             db.delete(r)
         stats["logo_rules"] += len(rules)
@@ -143,11 +143,11 @@ def purge_expired() -> dict:
             .all()
         )
         for g in groups:
-            if g.logo_path and g.logo_path.replace("\\", "/").startswith("logos/"):
+            if g.logo_path and data_dirs.translate_rel(g.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
                 _unlink_under_data(g.logo_path)
             # 成员规则若因单独删除被漏掉（时间戳不同），随分组一并清除
             for r in db.query(LogoRule).filter(LogoRule.group_id == g.id).all():
-                if r.logo_path and r.logo_path.replace("\\", "/").startswith("logos/"):
+                if r.logo_path and data_dirs.translate_rel(r.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
                     _unlink_under_data(r.logo_path)
                 db.delete(r)
             db.delete(g)
@@ -161,7 +161,7 @@ def purge_expired() -> dict:
             .all()
         )
         for s in sources:
-            if s.logo_path and s.logo_path.replace("\\", "/").startswith("logos/"):
+            if s.logo_path and data_dirs.translate_rel(s.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
                 _unlink_under_data(s.logo_path)
             db.delete(s)
         stats["sources"] += len(sources)

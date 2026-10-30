@@ -8,14 +8,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
 import time
-import urllib.request
 from http.server import ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +25,6 @@ from seed_fake_test import (  # noqa: E402
     FakeQbState,
     MpHandler,
     QbHandler,
-    _free_port,
     _request,
     _wait_health,
 )

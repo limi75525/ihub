@@ -51,7 +51,7 @@ from app.schemas.auth import (
     TokenOut,
     UserOut,
 )
-from app.services.uploads import read_limited, save_bytes, save_unique
+from app.services.uploads import read_limited, save_bytes
 from app.core import data_dirs
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -290,8 +290,8 @@ def avatar_url_for(user: User) -> str | None:
     """头像地址附带文件修改时间，更换头像后 URL 变化，规避浏览器缓存旧图。"""
     if not user.avatar_path:
         return None
-    path = Path(settings.DATA_DIR) / user.avatar_path
-    v = safe_mtime(path)
+    path = data_dirs.resolve_rel(user.avatar_path)
+    v = safe_mtime(path) if path else None
     if not v:
         return None
     return f"/api/v1/users/avatar/{user.id}?v={v}"
@@ -396,7 +396,7 @@ def login(
     if prev_ip and prev_ip != ip:
         try:
             from app.services import notify_service
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             local_ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
             notify_service.create(
@@ -482,8 +482,9 @@ def update_profile(
 def _store_avatar(user: User, ext: str, data: bytes) -> str:
     """删除旧头像并落盘新文件（磁盘写，放线程池）；返回入库用的相对路径。"""
     if user.avatar_path:
-        old = Path(settings.DATA_DIR) / user.avatar_path
-        old.unlink(missing_ok=True)
+        old = data_dirs.resolve_rel(user.avatar_path)
+        if old:
+            old.unlink(missing_ok=True)
     return save_bytes(data_dirs.AVATARS, f"ihub_user_avatars_{user.id}{ext}", data)
 
 

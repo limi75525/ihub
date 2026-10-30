@@ -11,7 +11,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.fsutil import data_file, safe_mtime_ns
+from app.core.fsutil import safe_mtime_ns
 from app.core.sqlutil import like_prefix
 from app.core.timeutil import as_utc
 from app.core.deps import get_current_user, get_media_user
@@ -79,7 +79,8 @@ def _item_out(t: TransferItem) -> dict:
         # URL 带纳秒 mtime 版本号：transfer_items 无 AUTOINCREMENT，删除最大 id 行后新上传会
         # 复用同一 id，同一 URL 先后挂过两个文件——版本号让内容替换后 URL 随之变化，浏览器
         # 不再用旧缓存的图（缩略图/预览显示上一个文件的串图，下载绕过缓存反而正确）。
-        v = safe_mtime_ns(Path(settings.DATA_DIR) / t.file_path) if t.file_path else 0
+        p = data_dirs.resolve_rel(t.file_path)
+        v = safe_mtime_ns(p) if p else 0
         out["url"] = f"/api/v1/transfer/{t.id}/file?v={v}"
     return out
 
@@ -430,7 +431,9 @@ async def upload_files(
             db.rollback()
             for t in created:
                 try:
-                    (Path(settings.DATA_DIR) / t.file_path).unlink(missing_ok=True)
+                    p = data_dirs.resolve_rel(t.file_path)
+                    if p:
+                        p.unlink(missing_ok=True)
                 except OSError:
                     pass
             if current is not None:

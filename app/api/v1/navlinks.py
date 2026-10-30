@@ -5,8 +5,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth import ALLOWED_IMAGE_TYPES
-from app.core.config import settings
-from app.core.fsutil import data_file
 from app.core.netutil import safe_logo_url
 from app.core.timeutil import as_utc
 from app.core.deps import get_current_user, get_media_user

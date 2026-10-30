@@ -28,7 +28,6 @@ from app.core.ratelimit import LockoutCounter, SlidingWindowLimiter
 from app.core.security import verify_password
 from app.db.session import get_db
 from app.models.seed_connection import SeedConnection
-from app.models.source import Source  # noqa: F401 确保模型注册
 from app.models.user import User
 from app.schemas.seed import (
     SeedActionIn,
@@ -1046,6 +1045,40 @@ def mp_site_icon(
         media_type=mime,
         headers={"Cache-Control": "private, max-age=604800"},
     )
+
+
+@router.get("/mp/search-sites")
+def mp_search_sites(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """MP 设置→搜索订阅 的「搜索站点范围」（IndexerSites）：搜索弹窗默认勾选来源。
+
+    返回 MP 站点 id 列表；MP 未配置（null/空）时返回空列表，前端兜底为全量。"""
+    require_tab(user, db, "search")
+    conn = _mp_conn(db)
+
+    def load() -> dict:
+        return {"ids": mp_client(conn).search_site_ids()}
+
+    return cached(conn.id, "mp:search-sites", 300.0, load)
+
+
+@router.get("/mp/sites/{site_id}/test")
+def mp_site_test(
+    site_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """站点连通性测试：透传 MP 的 GET /site/test/{id}（以站点真实凭据访问一次，
+    结果写入 statistic，成功即刷新 lst_state）。结果实时返回，绝不缓存。"""
+    require_tab(user, db, "sites")
+    conn = _mp_conn(db)
+    try:
+        return mp_client(conn).site_test(site_id)
+    except SeedError as e:
+        # MP 不可达/站点不存在等：按「测试失败」返回，前端直接展示原因
+        return {"ok": False, "message": e.message}
 
 
 def _prewarm_cover_urls(items: list[dict], *, limit: int = 24) -> None:

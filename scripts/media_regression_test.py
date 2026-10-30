@@ -31,7 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
@@ -215,7 +215,6 @@ class JFHandler(BaseHTTPRequestHandler):
                     self._json({"error": "token revoked"}, 401)
                     return
             types = (qs.get("IncludeItemTypes") or [""])[0]
-            limit = (qs.get("Limit") or ["60"])[0]
             filters = (qs.get("Filters") or [""])[0]
             if filters == "IsResumable":
                 self._json({"Items": MOVIES, "TotalRecordCount": 1})
@@ -763,7 +762,7 @@ def main() -> int:
             body = resp.read()
         check(body.startswith(b"IMG:/t/p/w1280/regr-backdrop-2021.jpg"),
               "电影剧照来自 TMDB 缓存（w1280）", str(body[:44]))
-        cache_dir = DATA_DIR / "video_covers"
+        cache_dir = DATA_DIR / "ihub_media" / "video_covers"  # 2026-10-25 起 v2 目录布局
         check((cache_dir / "poster-movie-2021.jpg").is_file() and (cache_dir / "backdrop-movie-2021.jpg").is_file(),
               "缓存文件落盘 data/video_covers", str(sorted(p.name for p in cache_dir.glob("*"))[:4]))
         req = urllib.request.Request(f"{BASE}/api/v1/video/nas/logo/{tm_item['id']}?token={MEDIA_KEY['v']}")

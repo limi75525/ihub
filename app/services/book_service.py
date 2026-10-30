@@ -10,7 +10,6 @@ import re
 import shutil
 import zipfile
 from html.parser import HTMLParser
-from io import BytesIO
 from pathlib import Path
 
 from app.core.config import settings
@@ -514,9 +513,9 @@ def parse_epub_fallback_html(html_path: Path, fallback_title: str) -> dict:
     return {"title": fallback_title, "author": "", "cover_bytes": None, "chapters": chapters}
 
 
-def split_by_headings(html: str, min_chars: int = 6000) -> list[str]:
+def split_by_headings(html: str) -> list[str]:
     """无结构的整本 HTML 按 h1-h3 标题边界拆分（返回原始 HTML 片段列表）；
-    标题太少或正文过短时返回单块。"""
+    标题太少时返回单块。"""
     marks = [
         (m.start(), re.sub(r"<[^>]+>", "", m.group(0)).strip()[:120])
         for m in re.finditer(r"<h[1-3][^>]*>.*?</h[1-3]>", html, flags=re.S | re.I)
@@ -538,8 +537,6 @@ def split_by_headings(html: str, min_chars: int = 6000) -> list[str]:
 
 def parse_mobi(path: Path, fallback_title: str = "") -> dict:
     """MOBI/AZW3：mobi 库自动转换（临时目录优先 EPUB，其次 HTML），再走对应解析。"""
-    import tempfile
-
     from mobi import extract
 
     tmp, out = extract(str(path))  # 返回 (临时目录, 产物路径)：EPUB 优先，退回 HTML

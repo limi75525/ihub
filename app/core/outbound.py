@@ -85,10 +85,13 @@ def opener_for(url: str, *handlers):
     return urllib.request.build_opener(handler, *handlers)
 
 
-def open_with_retry(req: urllib.request.Request, timeout: int, *, retry_refused: bool = True):
+def open_with_retry(
+    req: urllib.request.Request, timeout: int, *, retry_refused: bool = True, handlers: tuple = ()
+):
     """ opener_for(req.full_url) 的带重试封装：连接在建立前被拒（请求未被对端处理，
-    POST 亦安全）时退避重试一次；超时不重试（可能已受理，避免写操作重复执行）。"""
-    opener = opener_for(req.full_url)
+    POST 亦安全）时退避重试一次；超时不重试（可能已受理，避免写操作重复执行）。
+    handlers 透传给 opener（如安全重定向校验）。"""
+    opener = opener_for(req.full_url, *handlers)
     last: Exception | None = None
     for attempt in range(2):
         try:

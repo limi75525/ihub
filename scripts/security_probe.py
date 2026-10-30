@@ -418,7 +418,6 @@ def main() -> None:
     status, _, _ = jreq("PATCH", "/api/v1/settings/image-cache", {"enabled": True}, token=admin["access_token"])
     assert status == 200, "开启图片缓存失败（脚本前置条件）"
     import glob as _glob
-    import os as _os
 
     local_img = ""
     for pat in ("C:/Windows/Web/Wallpaper/**/*.jpg", "C:/Windows/Web/**/*.png"):

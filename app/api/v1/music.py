@@ -546,7 +546,7 @@ def _drop_track_cover(row: MusicTrack, data: Path) -> None:
         (data / row.cover_path).unlink(missing_ok=True)
 
 
-def _run_scan(root_str: str, data_dir: str, trigger_user_id: int) -> None:
+def _run_scan(root_str: str, data_dir: str) -> None:
     root = Path(root_str).resolve()
     data = Path(data_dir)
     rescan_all = _SCAN.read().get("scanner_version") != SCANNER_VERSION
@@ -582,7 +582,7 @@ def scan_library(admin: User = Depends(get_current_admin), db: Session = Depends
     started, state = _SCAN.begin()
     if not started:
         return {"ok": True, "started": False, "state": state}
-    threading.Thread(target=_run_scan, args=(str(root), str(Path(cfg.DATA_DIR)), admin.id), daemon=True).start()
+    threading.Thread(target=_run_scan, args=(str(root), str(Path(cfg.DATA_DIR))), daemon=True).start()
     return {"ok": True, "started": True}
 
 
@@ -925,10 +925,8 @@ def track_cover(track_id: int, user: User = Depends(get_media_user), db: Session
     t = db.get(MusicTrack, track_id)
     if not t or not t.cover_path:
         raise HTTPException(404, "无封面")
-    path = (Path(cfg.DATA_DIR) / t.cover_path).resolve()
-    try:
-        path.relative_to(Path(cfg.DATA_DIR).resolve())
-    except ValueError:
+    path = data_dirs.resolve_rel(t.cover_path)
+    if not path:
         raise HTTPException(404, "无封面")
     if not path.is_file():
         raise HTTPException(404, "无封面")
@@ -1137,7 +1135,8 @@ def _pl_out(p: MusicPlaylist, song_count: int = 0, cover_key: str = "", cover_so
     cover_v = 0
     if p.cover_path:
         try:
-            cover_v = int((Path(cfg.DATA_DIR) / p.cover_path).stat().st_mtime)
+            cp = data_dirs.resolve_rel(p.cover_path)
+            cover_v = int(cp.stat().st_mtime) if cp else 0
         except OSError:
             cover_v = 0
     return {
@@ -1233,7 +1232,9 @@ def playlist_delete(pid: int, user: User = Depends(get_current_user), db: Sessio
     row = _own_playlist(db, pid, user.id)
     db.query(MusicPlaylistItem).filter(MusicPlaylistItem.playlist_id == row.id).delete()
     if row.cover_path:
-        (Path(cfg.DATA_DIR) / row.cover_path).unlink(missing_ok=True)
+        pc = data_dirs.resolve_rel(row.cover_path)
+        if pc:
+            pc.unlink(missing_ok=True)
     db.delete(row)
     db.commit()
     return {"ok": True}
@@ -1334,7 +1335,7 @@ def playlist_cover_get(pid: int, user: User = Depends(get_media_user), db: Sessi
     # 与书架 /books/{id}/cover 同一标准：媒体接口必须做属主校验，他人歌单封面一律 404
     if not row or row.user_id != user.id or not row.cover_path:
         raise HTTPException(404, "无封面")
-    path = (Path(cfg.DATA_DIR) / row.cover_path).resolve()
+    path = data_dirs.resolve_rel(row.cover_path)
     try:
         path.relative_to(Path(cfg.DATA_DIR).resolve())
     except ValueError:
@@ -1408,7 +1409,9 @@ async def playlist_cover_upload(
 def playlist_cover_remove(pid: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = _own_playlist(db, pid, user.id)
     if row.cover_path:
-        (Path(cfg.DATA_DIR) / row.cover_path).unlink(missing_ok=True)
+        pc = data_dirs.resolve_rel(row.cover_path)
+        if pc:
+            pc.unlink(missing_ok=True)
         row.cover_path = None
         db.commit()
     return {"ok": True, "playlist": _pl_out(row)}

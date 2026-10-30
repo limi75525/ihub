@@ -154,12 +154,7 @@ async def upload_user_avatar(
 
 @router.get("/avatar/{user_id}")
 def get_avatar(user_id: int, user: User = Depends(get_media_user), db: Session = Depends(get_db)):
-    from pathlib import Path
-
     from fastapi.responses import FileResponse
-
-    from app.core.config import settings
-    from app.core.fsutil import data_file
 
     # 用户数据按账号隔离：仅本人与管理员可取他人头像（头像用于用户管理列表）
     if user.id != user_id and user.role != "admin":

@@ -567,19 +567,19 @@ def main() -> int:
             overview,
         )
 
-        status, summary = _request(base, "GET", "/api/v1/seeds/qb/summary", user)
-        check("普通用户读 QB 摘要", status == 200 and summary.get("downloading") == 1, summary)
-        status, traffic = _request(base, "GET", "/api/v1/seeds/qb/traffic", user)
+        status, summary = _request(base, "GET", "/api/v1/seeds/qb/summary", admin)
+        check("读 QB 摘要", status == 200 and summary.get("downloading") == 1, summary)
+        status, traffic = _request(base, "GET", "/api/v1/seeds/qb/traffic", admin)
         check(
-            "普通用户读流量曲线",
+            "读流量曲线",
             status == 200 and bool(traffic.get("items")) and traffic.get("interval") == 1.5,
             traffic,
         )
-        status, torrents = _request(base, "GET", "/api/v1/seeds/qb/torrents", user)
-        check("普通用户读种子列表", status == 200 and torrents.get("total") == 2, torrents)
+        status, torrents = _request(base, "GET", "/api/v1/seeds/qb/torrents", admin)
+        check("读种子列表", status == 200 and torrents.get("total") == 2, torrents)
         check("种子列表不含 tracker passkey", "SECRET" not in json.dumps(torrents, ensure_ascii=False), torrents)
         by_hash = {x.get("hash"): x for x in torrents.get("items", [])}
-        status, tag_options = _request(base, "GET", "/api/v1/seeds/qb/tags", user)
+        status, tag_options = _request(base, "GET", "/api/v1/seeds/qb/tags", admin)
         check(
             "标签筛选隐藏零使用标签",
             status == 200
@@ -599,12 +599,12 @@ def main() -> int:
             not by_hash.get("bbb222", {}).get("media_poster"),
             by_hash.get("bbb222"),
         )
-        status, sorted_torrents = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=name", user)
+        status, sorted_torrents = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=name", admin)
         names = [t.get("name") for t in sorted_torrents.get("items", [])]
         check("按名称排序", status == 200 and names == sorted(names), names)
-        status, asc = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=size", user)
+        status, asc = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=size", admin)
         asc_hashes = [t.get("hash") for t in asc.get("items", [])]
-        status2, desc = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=-size", user)
+        status2, desc = _request(base, "GET", "/api/v1/seeds/qb/torrents?sort=-size", admin)
         desc_hashes = [t.get("hash") for t in desc.get("items", [])]
         check(
             "按大小正序/倒序",
@@ -613,8 +613,8 @@ def main() -> int:
             and desc_hashes == ["aaa111", "bbb222"],
             (asc_hashes, desc_hashes),
         )
-        status, detail = _request(base, "GET", "/api/v1/seeds/qb/torrents/aaa111", user)
-        check("普通用户读种子详情", status == 200 and detail.get("files"), detail)
+        status, detail = _request(base, "GET", "/api/v1/seeds/qb/torrents/aaa111", admin)
+        check("读种子详情", status == 200 and detail.get("files"), detail)
         check("种子详情不含 tracker passkey", "SECRET" not in json.dumps(detail, ensure_ascii=False), detail)
         status, _ = _request(
             base, "POST", "/api/v1/seeds/qb/torrents/aaa111/action", user, {"action": "pause"}
@@ -730,17 +730,19 @@ def main() -> int:
         )
         check("批量删除种子", status == 200, (status, bulk_result))
 
-        status, subs = _request(base, "GET", "/api/v1/seeds/mp/subscriptions?type=all", user)
+        status, subs = _request(base, "GET", "/api/v1/seeds/mp/subscriptions?type=all", admin)
         check("订阅列表", status == 200 and len(subs.get("items", [])) == 3, subs)
-        status, subs_tv = _request(base, "GET", "/api/v1/seeds/mp/subscriptions?type=tv", user)
+        status, subs_tv = _request(base, "GET", "/api/v1/seeds/mp/subscriptions?type=tv", admin)
         check("订阅按类型筛选", status == 200 and len(subs_tv.get("items", [])) == 1, subs_tv)
         status, sites = _request(base, "GET", "/api/v1/seeds/mp/sites", admin)
         check("站点列表含账号数据", status == 200 and sites[0].get("ratio") == 2.0, sites)
-        status, sites_user = _request(base, "GET", "/api/v1/seeds/mp/sites", user)
-        check("全部可见时普通用户可见站点账号数据", status == 200 and sites_user[0].get("ratio") == 2.0, sites_user)
-        status, search = _request(base, "GET", "/api/v1/seeds/mp/search?q=盗梦", user)
-        item = (search.get("items") or [{}])[0]
-        check("资源搜索", status == 200 and item.get("title"), search)
+        status, _ = _request(base, "GET", "/api/v1/seeds/mp/sites", user)
+        check("普通用户读站点列表 403（固定管理员可见）", status == 403, status)
+        status, _ = _request(base, "GET", "/api/v1/seeds/mp/search?q=盗梦", user)
+        check("普通用户资源搜索 403（固定管理员可见）", status == 403, status)
+        status, admin_search = _request(base, "GET", "/api/v1/seeds/mp/search?q=盗梦", admin)
+        item = (admin_search.get("items") or [{}])[0]
+        check("资源搜索", status == 200 and item.get("title"), admin_search)
         check(
             "搜索结果不含 passkey",
             "enclosure" not in item and "site_cookie" not in item and "site_ua" not in item,
@@ -748,13 +750,10 @@ def main() -> int:
         )
         check(
             "搜索结果页面地址中的 passkey 已脱敏",
-            "SECRET" not in json.dumps(search, ensure_ascii=False),
-            search,
+            "SECRET" not in json.dumps(admin_search, ensure_ascii=False),
+            admin_search,
         )
-        check("普通用户搜索结果不带操作引用", not item.get("op_id"), item)
-        status, admin_search = _request(base, "GET", "/api/v1/seeds/mp/search?q=盗梦", admin)
-        admin_item = (admin_search.get("items") or [{}])[0]
-        op_id = admin_item.get("op_id") or ""
+        op_id = item.get("op_id") or ""
         check("管理员搜索结果带操作引用", bool(op_id), admin_search)
         check(
             "管理员搜索结果同样不含站点凭据",
@@ -812,20 +811,20 @@ def main() -> int:
             "SECRET" not in json.dumps([download, subscribe], ensure_ascii=False),
             [download, subscribe],
         )
-        status, media = _request(base, "GET", "/api/v1/seeds/mp/media?q=盗梦", user)
+        status, media = _request(base, "GET", "/api/v1/seeds/mp/media?q=盗梦", admin)
         check("影视搜索", status == 200 and media.get("items"), media)
         status, tlist = _request(
-            base, "GET", "/api/v1/seeds/mp/torrents?media_id=27205&media_source=tmdb", user
+            base, "GET", "/api/v1/seeds/mp/torrents?media_id=27205&media_source=tmdb", admin
         )
         check("按媒体搜种子", status == 200 and tlist.get("items"), tlist)
-        status, discover = _request(base, "GET", "/api/v1/seeds/mp/discover?source=tmdb_movies", user)
+        status, discover = _request(base, "GET", "/api/v1/seeds/mp/discover?source=tmdb_movies", admin)
         check("影视探索", status == 200 and discover.get("items"), discover)
-        status, recommend = _request(base, "GET", "/api/v1/seeds/mp/recommend", user)
+        status, recommend = _request(base, "GET", "/api/v1/seeds/mp/recommend", admin)
         check("影视推荐", status == 200 and recommend.get("items"), recommend)
         status, ani = _request(
             base, "GET",
             "/api/v1/seeds/mp/discover?source=anilist&sort=TRENDING_DESC&format=TV&genre=Action&page=1&count=5",
-            user,
+            admin,
         )
         check(
             "探索 AniList 来源与筛选参数",
@@ -839,7 +838,7 @@ def main() -> int:
         status, douban_music = _request(
             base, "GET",
             "/api/v1/seeds/mp/discover?source=douban_music&tags=%E6%B5%81%E8%A1%8C,%E5%8D%8E%E8%AF%AD&douban_sort=U&with_cover=all&page=1&count=5",
-            user,
+            admin,
         )
         check(
             "探索豆瓣音乐复用 music/explore 且封面参数转布尔",
@@ -854,7 +853,7 @@ def main() -> int:
         status, musicbrainz = _request(
             base, "GET",
             "/api/v1/seeds/mp/discover?source=musicbrainz&mode=chart&entity=album&range_name=this_month&sort_by=listen_count.desc&with_cover=with_cover&page=1&count=5",
-            user,
+            admin,
         )
         check(
             "探索 MusicBrainz 筛选与封面参数",
@@ -869,7 +868,7 @@ def main() -> int:
         status, section = _request(
             base, "GET",
             "/api/v1/seeds/mp/recommend?source=recommend/tmdb_trending&page=1&count=5",
-            user,
+            admin,
         )
         check(
             "推荐页板块走 MP recommend 板块路径",
@@ -879,7 +878,7 @@ def main() -> int:
             and FakeMpState.last_recommend[0] == "/api/v1/recommend/tmdb_trending",
             section,
         )
-        status, brush = _request(base, "GET", "/api/v1/seeds/mp/brush", user)
+        status, brush = _request(base, "GET", "/api/v1/seeds/mp/brush", admin)
         check("刷流只读", status == 200 and brush.get("available") and brush.get("tasks"), brush)
 
         # 事件：先让 worker 建立水位，再追加新完成种子/新通知
@@ -910,32 +909,26 @@ def main() -> int:
             "reg_time": "2026-10-21 11:01:00",
         })
         time.sleep(5)
-        status, msgs = _request(base, "GET", "/api/v1/messages?page_size=50&order=time", admin)
-        titles = [m.get("title") for m in (msgs.get("items") or [])]
-        check("下载完成事件进消息中心", "种子下载完成" in titles, titles)
-        download_msgs = [m for m in (msgs.get("items") or []) if m.get("title") == "种子下载完成"]
-        check("刷流种子不发完成通知", len(download_msgs) == 1, download_msgs)
-        check("订阅完成事件进消息中心", "订阅完成" in titles, titles)
-        check("签到失败事件进消息中心", "站点签到失败" in titles, titles)
+        # 2026-10-25 起种子事件写系统通知（notifications 表），不再进消息中心
+        status, notifs = _request(base, "GET", "/api/v1/notifications?limit=100", admin)
+        titles = [m.get("title") for m in (notifs.get("items") or [])]
+        check("下载完成事件进通知中心", "种子下载完成" in titles, titles)
+        download_ntfs = [m for m in (notifs.get("items") or []) if m.get("title") == "种子下载完成"]
+        check("刷流种子不发完成通知", len(download_ntfs) == 1, download_ntfs)
+        check("订阅完成事件进通知中心", "订阅完成" in titles, titles)
+        check("签到失败事件进通知中心", "站点签到失败" in titles, titles)
 
+        # 种子事件不再创建「种子」系统来源（启动时一并清理历史来源）
         status, admin_sources = _request(base, "GET", "/api/v1/sources", admin)
         status, user_sources = _request(base, "GET", "/api/v1/sources", user)
-        check("管理员可见系统来源", any(s.get("is_system") for s in (admin_sources or [])), admin_sources)
+        check("种子事件不再建系统来源", not any(s.get("is_system") for s in (admin_sources or [])), admin_sources)
         check("普通用户看不到系统来源", not any(s.get("is_system") for s in (user_sources or [])), user_sources)
 
-        status, _ = _request(base, "PATCH", "/api/v1/settings/system-sources", admin, {"hidden": True})
-        status, admin_sources2 = _request(base, "GET", "/api/v1/sources", admin)
-        check("隐藏系统来源开关生效", status == 200 and not any(s.get("is_system") for s in (admin_sources2 or [])), admin_sources2)
-
-        status, _ = _request(base, "PATCH", "/api/v1/seeds/settings", admin, {"visibility": "admin_only"})
+        # 种子模块固定管理员可见，可见范围设置项已移除
         status, st = _request(base, "GET", "/api/v1/seeds/status", user)
-        check("仅管理员可见范围", status == 200 and st.get("visible") is False, st)
+        check("固定管理员可见（普通用户 visible=False）", status == 200 and st.get("visible") is False, st)
         status, _ = _request(base, "GET", "/api/v1/seeds/qb/torrents", user)
-        check("不可见时普通用户读接口 403", status == 403, status)
-        status, _ = _request(base, "PATCH", "/api/v1/seeds/settings", admin, {"visibility": "standard"})
-        status, sites_std = _request(base, "GET", "/api/v1/seeds/mp/sites", user)
-        check("常规可见隐藏站点账号数据", status == 200 and "ratio" not in sites_std[0], sites_std)
-        status, _ = _request(base, "PATCH", "/api/v1/seeds/settings", admin, {"visibility": "all"})
+        check("普通用户读接口 403", status == 403, status)
 
     except Exception as exc:
         failed.append(f"异常：{type(exc).__name__}: {exc}")

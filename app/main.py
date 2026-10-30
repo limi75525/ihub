@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.data_dirs import migrate_layout, migrate_network_proxy
-from app.core.crypto import decrypt_text, encrypt_text
+from app.core.crypto import encrypt_text
 from app.core.netutil import client_ip
 from app.db.base import Base
 from app.db.session import SessionLocal, engine

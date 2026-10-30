@@ -121,7 +121,7 @@ _nonce_last_cleanup = 0.0
 def _consume_nonce(db: Session, device_code: str, nonce: str) -> bool:
     """插入 nonce 唯一键判定重放；返回 False 表示重复。过期行低频清理。"""
     global _nonce_last_cleanup
-    from datetime import datetime, timedelta
+    from datetime import timedelta
 
     from app.models.ingest_nonce import IngestNonce
 

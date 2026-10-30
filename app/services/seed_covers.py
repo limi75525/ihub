@@ -169,10 +169,10 @@ def _cache_file(key: str) -> Path | None:
 
 def _fetch(raw: str) -> tuple[bytes, str]:
     _validate_url(raw)
-    opener = outbound.opener_for(raw, _SafeRedirectHandler())
     req = UrlRequest(raw, headers=_headers(raw))
     try:
-        with outbound.open_with_retry(req, TIMEOUT) as resp:
+        # 安全校验的 redirect handler 必须真正挂到最终 opener 上（open_with_retry 内部自建）
+        with outbound.open_with_retry(req, TIMEOUT, handlers=(_SafeRedirectHandler(),)) as resp:
             content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             if content_type not in _TYPES:
                 raise SeedError("上游返回了非图片内容", 404)

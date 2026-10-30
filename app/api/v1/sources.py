@@ -1,6 +1,5 @@
 import logging
 import secrets
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -11,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.crypto import encrypt_text
 from app.core.deps import get_current_user, get_media_user
-from app.core.fsutil import data_file
 from app.core.netutil import safe_logo_url
 from app.core.timeutil import as_utc
 from app.db.session import get_db
@@ -96,7 +94,9 @@ def _own_source(db: Session, user: User, source_id: int) -> Source:
 
 def _clear_logo_file(source: Source) -> None:
     if source.logo_path:
-        (Path(settings.DATA_DIR) / source.logo_path).unlink(missing_ok=True)
+        p = data_dirs.resolve_rel(source.logo_path)
+        if p:
+            p.unlink(missing_ok=True)
         source.logo_path = None
 
 
@@ -302,9 +302,9 @@ def delete_source(
 
 def _owned_logo_file(rel: str | None):
     """来源自己上传的 Logo（data/logos/ 下）才可物理删除；库内引用文件与外链不动。"""
-    if not rel or not rel.replace("\\", "/").startswith("logos/"):
+    if not rel or not data_dirs.translate_rel(rel.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
         return None
-    return Path(settings.DATA_DIR) / rel
+    return data_dirs.resolve_rel(rel)
 
 
 class ReorderIn(BaseModel):
@@ -364,7 +364,6 @@ def get_logo_file(
 ):
     from fastapi.responses import FileResponse
 
-    from app.core.fsutil import data_file
 
     source = _own_source(db, user, source_id)
     if not source.logo_path:

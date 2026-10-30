@@ -15,7 +15,6 @@ from app.api.v1.auth import registration_open
 from app.api.v1.recycle import recycle_enabled
 from app.core.config import settings as cfg
 from app.core.deps import get_current_admin
-from app.core.fsutil import data_file
 from app.db.session import get_db
 from app.models.system_setting import get_int_setting, get_setting, get_setting_db, set_setting
 from app.models.user import User

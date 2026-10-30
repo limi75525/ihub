@@ -380,7 +380,7 @@ class MpClient:
         try:
             with self._opener.open(req, timeout=15) as resp:
                 body = resp.read(MAX_RESPONSE)
-        except HTTPError as e:
+        except HTTPError:
             raise SeedAuthError("MoviePilot 登录失败，请检查用户名/密码") from None
         except (URLError, TimeoutError, OSError) as e:
             reason = str(getattr(e, "reason", None) or e)
@@ -589,6 +589,38 @@ class MpClient:
         if isinstance(data, dict):
             return str(data.get("icon") or "")
         return ""
+
+    def site_test(self, site_id) -> dict:
+        """站点连通性测试：MP 以站点真实凭据（Cookie/API Key）访问一次并写入
+        statistic（成功即刷新 lst_state，站点页状态点随之翻绿）。返回 {ok, message}。
+
+        结果必须实时（MP 侧也是现算），调用方不得缓存本结果。"""
+        value = self._api(
+            "GET", f"/api/v1/site/test/{quote(str(site_id), safe='')}", timeout=90
+        )
+        # success/message 挂在响应信封上（data 恒为 null），不能走 unwrap_mp 拆包
+        if isinstance(value, dict) and "success" in value:
+            return {"ok": bool(value.get("success")), "message": str(value.get("message") or "")}
+        data = unwrap_mp(value)
+        if isinstance(data, dict):
+            return {"ok": bool(data.get("success")), "message": str(data.get("message") or "")}
+        return {"ok": False, "message": ""}
+
+    def search_site_ids(self) -> list[int]:
+        """MP 设置→搜索订阅 的「搜索站点范围」（IndexerSites，MP 站点 id 列表）。
+
+        未配置（null/空）返回空列表，由调用方兜底为全量站点。"""
+        value = self._api("GET", f"/api/v1/system/setting/{quote('IndexerSites', safe='')}")
+        data = unwrap_mp(value)
+        if isinstance(data, dict) and isinstance(data.get("value"), list):
+            out = []
+            for x in data["value"]:
+                try:
+                    out.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+            return out
+        return []
 
     # ---- 搜索/发现/推荐 ----
     def search_title(

@@ -53,7 +53,6 @@ def _xml_escape(v: str) -> str:
 def write_xlsx(path: Path, header: list[str], rows: list[list[str]]) -> None:
     import zipfile
 
-    sheet_rows = [_XLSX_HEADER_STYLE] + [0] * len(rows)  # 行样式占位（表头行加粗）
     cells_xml = []
     for r_idx, row in enumerate([header] + rows, start=1):
         cells = []

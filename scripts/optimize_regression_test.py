@@ -197,7 +197,6 @@ def main() -> int:
     st, rule = call("POST", f"/api/v1/logos/groups/{gid}/rules",
                     {"signature": "回归签名", "account": "13800001234", "library_file_id": r_item["id"]}, token=token2)
     check("建规则并引用 gif 库图", st in (200, 201) and rule.get("logo_kind") == "file", f"{st} {rule}")
-    rid = rule["id"]
 
     st, zbytes = call("GET", "/api/v1/logos/export", token=token2)
     check("导出 ZIP", st == 200 and zbytes[:2] == b"PK", f"status={st}")

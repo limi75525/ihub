@@ -24,7 +24,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth import sanitize_svg
-from app.core.config import settings
 from app.core.deps import get_current_user, get_media_user
 from app.core.netutil import safe_logo_url
 from app.models.system_setting import get_setting
@@ -244,10 +243,6 @@ class RuleBatchCreate(BaseModel):
     """批量添加成员规则（同一企业默认头像）。items 为匹配字段列表。"""
 
     items: list[dict] = Field(min_length=1, max_length=100)
-
-
-class BatchDeleteIn(BaseModel):
-    ids: list[int] = Field(min_length=1, max_length=500)
 
 
 @router.get("/groups")
@@ -474,8 +469,10 @@ def _clear_logo_file(obj) -> None:
     """清掉对象自己的 Logo 文件（data/logos/ 下的上传/缓存文件）。
     引用自文件库的图片（data/transfer/...）归文件库所有，不能连带删除。"""
     if obj.logo_path:
-        if obj.logo_path.replace("\\", "/").startswith("logos/"):
-            (Path(settings.DATA_DIR) / obj.logo_path).unlink(missing_ok=True)
+        if data_dirs.translate_rel(obj.logo_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
+            p = data_dirs.resolve_rel(obj.logo_path)
+            if p:
+                p.unlink(missing_ok=True)
         obj.logo_path = None
 
 
@@ -569,8 +566,10 @@ def _cache_remote_logo(model_cls, obj_id: int, url: str) -> None:
             obj.logo_path = save_unique(data_dirs.AVATARS, "cache", ext, data)
             db.commit()
             # 旧缓存文件（cache_*）换新后删除，避免反复改 logo_url 灌磁盘
-            if old_path and old_path.startswith("logos/cache_"):
-                (Path(settings.DATA_DIR) / old_path).unlink(missing_ok=True)
+            if old_path and data_dirs.translate_rel(old_path.replace("\\", "/")).startswith(data_dirs.AVATARS + "/cache_"):
+                p = data_dirs.resolve_rel(old_path)
+                if p:
+                    p.unlink(missing_ok=True)
         finally:
             db.close()
     except Exception:
@@ -678,7 +677,6 @@ async def upload_rule_logo(
 def _serve_logo_file(obj):
     if not obj.logo_path:
         raise HTTPException(404, "未上传 Logo")
-    from app.core.fsutil import data_file
 
     path = data_dirs.resolve_rel(obj.logo_path)
     if not path or not path.is_file():
@@ -724,16 +722,16 @@ def export_logos(user: User = Depends(get_current_user), db: Session = Depends(g
         for g in groups:
             g_logo_file = None
             if g.logo_path:
-                p = Path(settings.DATA_DIR) / g.logo_path
-                if p.is_file():
+                p = data_dirs.resolve_rel(g.logo_path)
+                if p and p.is_file():
                     g_logo_file = f"images/group_{g.id}{p.suffix.lower()}"
                     zf.writestr(g_logo_file, p.read_bytes())
             rule_entries = []
             for r in _group_rules(db, user, g.id):
                 r_logo_file = None
                 if r.logo_path:
-                    p = Path(settings.DATA_DIR) / r.logo_path
-                    if p.is_file():
+                    p = data_dirs.resolve_rel(r.logo_path)
+                    if p and p.is_file():
                         r_logo_file = f"images/rule_{r.id}{p.suffix.lower()}"
                         zf.writestr(r_logo_file, p.read_bytes())
                 rule_entries.append({

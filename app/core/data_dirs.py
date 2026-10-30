@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 from pathlib import Path
 
 from app.core.config import settings
@@ -145,15 +144,6 @@ def migrate_layout() -> None:
             _move_dir(root / "transfer", root / TRANSFER, journal)
 
             # ---- 合并阶段：logos/ 与 avatars/ → ihub_avatars/ ----
-            # 先查用户头像引用，供旧 user_* 文件改名与孤儿清理
-            referenced_avatars: set[str] = set()
-            db = SessionLocal()
-            try:
-                rows = db.execute(text("SELECT avatar_path FROM users WHERE avatar_path IS NOT NULL AND avatar_path != ''")).fetchall()
-                referenced_avatars = {r[0].replace("\\", "/") for r in rows}
-            finally:
-                db.close()
-
             target = root / AVATARS
             target.mkdir(parents=True, exist_ok=True)
             for legacy in ("logos", "avatars"):

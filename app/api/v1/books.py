@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.deps import get_current_user, get_media_user
-from app.core.fsutil import data_file, safe_mtime
+from app.core.fsutil import safe_mtime
 from app.core.timeutil import as_utc
 from app.db.session import get_db
 from app.models.book import Book, BookChapter, BookProgress
@@ -37,7 +37,6 @@ BOOK_MIME = {
 
 BOOK_EXTS = {".txt", ".epub", ".pdf", ".mobi", ".azw3", ".fb2"}
 BOOK_MAX_SIZE = 200 * 1024 * 1024  # 单本 200MB，书籍文件远小于该值
-REFLOW_EXTS = {".txt", ".epub", ".mobi", ".azw3", ".fb2"}  # 可重排阅读的格式；PDF 走内嵌查看器
 
 
 def _own_book(db: Session, user: User, book_id: int) -> Book:
@@ -60,7 +59,8 @@ def _cover_url(book: Book) -> str | None:
     safe_mtime：并发换封面（stat 时文件已被删除）不抛错，列表接口不 500。"""
     if not book.cover_path:
         return None
-    v = safe_mtime(Path(settings.DATA_DIR) / book.cover_path)
+    p = data_dirs.resolve_rel(book.cover_path)
+    v = safe_mtime(p) if p else None
     if not v:
         return None
     return f"/api/v1/books/{book.id}/cover?v={v}"
@@ -122,8 +122,8 @@ def import_book(
     ext = Path(item.file_name or "").suffix.lower()
     if ext not in BOOK_EXTS:
         raise HTTPException(400, "仅支持 TXT / EPUB / PDF / MOBI / AZW3 / FB2 格式")
-    src = (Path(settings.DATA_DIR) / item.file_path).resolve()
-    if not src.is_file():
+    src = data_dirs.resolve_rel(item.file_path)
+    if not src or not src.is_file():
         raise HTTPException(404, "文件库源文件缺失")
     if src.stat().st_size > BOOK_MAX_SIZE:
         raise HTTPException(400, "书籍文件不能超过 200MB")
@@ -346,7 +346,8 @@ def book_asset(
     book = _own_book(db, user, book_id)
     if book.format != "epub":
         raise HTTPException(404, "非 EPUB 图书")
-    data = book_service.epub_asset(Path(settings.DATA_DIR) / book.file_path, path)
+    src = data_dirs.resolve_rel(book.file_path)
+    data = book_service.epub_asset(src, path) if src else None
     if data is None:
         raise HTTPException(404, "资源不存在")
     from fastapi.responses import Response

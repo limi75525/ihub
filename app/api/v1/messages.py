@@ -7,9 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.core.deps import get_current_user, get_media_user
-from app.core.fsutil import data_file
 from app.core.sqlutil import escape_like
 from app.core.timeutil import as_utc
 from app.db.session import get_db

@@ -21,7 +21,6 @@ from app.services.moviepilot import MpClient
 from app.services.seed_covers import proxy_url
 from app.services.qbittorrent import QbClient
 from app.services.seed_common import (
-    SeedAuthError,
     SeedError,
     mp_transfer_matches,
     normalize_remote_path,

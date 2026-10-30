@@ -158,111 +158,110 @@ def run_janitor() -> dict:
 
 
 def _run_janitor_locked(detail: dict) -> dict:
-    if True:
-        now = time.time()
-        root = Path(settings.DATA_DIR)
-        n, b = _delete_expired(root / data_dirs.SEED_COVERS, SEED_COVER_TTL, now)
-        detail["seed_covers"] = {"files": n, "bytes": b}
-        n, b = _clean_tmp(root / data_dirs.TMP, now)
-        detail["tmp"] = {"files": n, "bytes": b}
+    now = time.time()
+    root = Path(settings.DATA_DIR)
+    n, b = _delete_expired(root / data_dirs.SEED_COVERS, SEED_COVER_TTL, now)
+    detail["seed_covers"] = {"files": n, "bytes": b}
+    n, b = _clean_tmp(root / data_dirs.TMP, now)
+    detail["tmp"] = {"files": n, "bytes": b}
 
-        db = None
-        from sqlalchemy import text
+    db = None
+    from sqlalchemy import text
 
-        from app.db.session import SessionLocal
+    from app.db.session import SessionLocal
 
-        try:
-            db = SessionLocal()
-            # 影视 TMDB 缓存：按库引用清理
-            rows = db.execute(
-                text("SELECT tmdb_id, series_tmdb_id FROM video_items")
-            ).fetchall()
-            valid = {
-                ("movie", r[0]) for r in rows if r[0]
-            } | {
-                ("tv", r[1]) for r in rows if r[1]
-            }
-            removed = tmdb.prune_cache(root / data_dirs.VIDEO_COVERS, valid)
-            detail["video_covers"] = {"files": removed, "bytes": 0}
-            # 孤儿检测
-            refs = _referenced(db)
-        finally:
-            db.close()
-        for rel_dir, referenced in refs.items():
-            n, b = _clean_orphans(root / rel_dir, referenced, now)
-            detail[rel_dir] = {"files": n, "bytes": b}
-
-        # PT 站点离线巡检：全部离线时通知管理员（每天最多一次，dedup 兜底）
-        try:
-            from app.db.session import SessionLocal as _Sess
-            from app.models.seed_connection import SeedConnection
-            from app.services.seed_service import mp_client
-
-            _db2 = _Sess()
-            try:
-                _conn = (
-                    _db2.query(SeedConnection)
-                    .filter(SeedConnection.kind == "moviepilot", SeedConnection.enabled.is_(True))
-                    .order_by(SeedConnection.id.asc())
-                    .first()
-                )
-                if _conn is not None:
-                    _stats = mp_client(_conn).site_statistics()
-                    _total = len(_stats)
-                    # 与 seeds._site_status 同口径：v3 的 statistic 没有 status 字段，
-                    # 改用「最近一次访问成功（lst_state==0）」判定；缺 lst_state 的老数据
-                    # 按 fail < success*10 粗判。之前按 status 判会永远 0/全离线误报。
-                    _ok = 0
-                    for s in _stats:
-                        if not isinstance(s, dict):
-                            continue
-                        lst = s.get("lst_state")
-                        if lst is not None:
-                            if str(lst) == "0":
-                                _ok += 1
-                            continue
-                        try:
-                            ok_cnt = int(s.get("success") or 0)
-                            bad_cnt = int(s.get("fail") or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        if ok_cnt > 0 and bad_cnt < ok_cnt * 10:
-                            _ok += 1
-                    if _total > 0 and _ok == 0:
-                        from app.services import notify_service
-
-                        notify_service.notify_admins(
-                            _db2,
-                            type="site_offline",
-                            title="PT 站点访问异常",
-                            body=(
-                                f"MoviePilot 的 {_total} 个站点最近一次访问全部失败，搜索与刷流可能不可用。"
-                                "请检查站点 Cookie 有效性与网络可达性。"
-                            ),
-                            link="#/seeds?tab=sites",
-                            dedup_key=f"site-offline:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
-                        )
-            finally:
-                _db2.close()
-        except Exception:
-            logger.exception("PT 站点离线巡检失败")
-
-        files = sum(d["files"] for d in detail.values())
-        freed = sum(d["bytes"] for d in detail.values())
-        result = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "files": files,
-            "bytes": freed,
-            "detail": detail,
+    try:
+        db = SessionLocal()
+        # 影视 TMDB 缓存：按库引用清理
+        rows = db.execute(
+            text("SELECT tmdb_id, series_tmdb_id FROM video_items")
+        ).fetchall()
+        valid = {
+            ("movie", r[0]) for r in rows if r[0]
+        } | {
+            ("tv", r[1]) for r in rows if r[1]
         }
-        try:
-            from app.models.system_setting import set_setting
+        removed = tmdb.prune_cache(root / data_dirs.VIDEO_COVERS, valid)
+        detail["video_covers"] = {"files": removed, "bytes": 0}
+        # 孤儿检测
+        refs = _referenced(db)
+    finally:
+        db.close()
+    for rel_dir, referenced in refs.items():
+        n, b = _clean_orphans(root / rel_dir, referenced, now)
+        detail[rel_dir] = {"files": n, "bytes": b}
 
-            set_setting(LAST_RUN_KEY, json.dumps(result, ensure_ascii=False))
-        except Exception:
-            logger.exception("写入 janitor_last_run 失败")
-        logger.info("定期清理完成：删除 %s 个文件，释放 %.1f MB", files, freed / 1048576)
-        return result
+    # PT 站点离线巡检：全部离线时通知管理员（每天最多一次，dedup 兜底）
+    try:
+        from app.db.session import SessionLocal as _Sess
+        from app.models.seed_connection import SeedConnection
+        from app.services.seed_service import mp_client
+
+        _db2 = _Sess()
+        try:
+            _conn = (
+                _db2.query(SeedConnection)
+                .filter(SeedConnection.kind == "moviepilot", SeedConnection.enabled.is_(True))
+                .order_by(SeedConnection.id.asc())
+                .first()
+            )
+            if _conn is not None:
+                _stats = mp_client(_conn).site_statistics()
+                _total = len(_stats)
+                # 与 seeds._site_status 同口径：v3 的 statistic 没有 status 字段，
+                # 改用「最近一次访问成功（lst_state==0）」判定；缺 lst_state 的老数据
+                # 按 fail < success*10 粗判。之前按 status 判会永远 0/全离线误报。
+                _ok = 0
+                for s in _stats:
+                    if not isinstance(s, dict):
+                        continue
+                    lst = s.get("lst_state")
+                    if lst is not None:
+                        if str(lst) == "0":
+                            _ok += 1
+                        continue
+                    try:
+                        ok_cnt = int(s.get("success") or 0)
+                        bad_cnt = int(s.get("fail") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if ok_cnt > 0 and bad_cnt < ok_cnt * 10:
+                        _ok += 1
+                if _total > 0 and _ok == 0:
+                    from app.services import notify_service
+
+                    notify_service.notify_admins(
+                        _db2,
+                        type="site_offline",
+                        title="PT 站点访问异常",
+                        body=(
+                            f"MoviePilot 的 {_total} 个站点最近一次访问全部失败，搜索与刷流可能不可用。"
+                            "请检查站点 Cookie 有效性与网络可达性。"
+                        ),
+                        link="#/seeds?tab=sites",
+                        dedup_key=f"site-offline:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+                    )
+        finally:
+            _db2.close()
+    except Exception:
+        logger.exception("PT 站点离线巡检失败")
+
+    files = sum(d["files"] for d in detail.values())
+    freed = sum(d["bytes"] for d in detail.values())
+    result = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "files": files,
+        "bytes": freed,
+        "detail": detail,
+    }
+    try:
+        from app.models.system_setting import set_setting
+
+        set_setting(LAST_RUN_KEY, json.dumps(result, ensure_ascii=False))
+    except Exception:
+        logger.exception("写入 janitor_last_run 失败")
+    logger.info("定期清理完成：删除 %s 个文件，释放 %.1f MB", files, freed / 1048576)
+    return result
 
 
 def storage_overview() -> dict:

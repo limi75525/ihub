@@ -45,23 +45,6 @@ class BatchActionIn(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=500)
 
 
-class MessageIngestIn(BaseModel):
-    title: str | None = None
-    content: str = Field(min_length=1, max_length=100000)
-    sender: str | None = None
-    extra: dict | None = None
-    timestamp: int | None = None  # Unix 秒级时间戳，可选
-
-
-class SmsIngestIn(BaseModel):
-    # 兼容 SmsForwarder 常用模板字段别名
-    content: str | None = Field(default=None, max_length=100000)
-    msg: str | None = Field(default=None, max_length=100000)
-    text: str | None = Field(default=None, max_length=100000)
-    sender: str | None = None
-    from_: str | None = Field(default=None, alias="from")
-    device: str | None = None
-    slot: str | None = None
     timestamp: int | None = None
 
     def get_content(self) -> str:

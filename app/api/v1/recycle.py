@@ -17,7 +17,7 @@ from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
+from app.core import data_dirs
 from app.core.deps import get_current_user
 from app.core.fsutil import safe_mtime
 from app.core.timeutil import as_utc
@@ -54,15 +54,11 @@ def _owned_logo(rel: str | None) -> Path | None:
     引用自文件库的图片（data/transfer/...）归文件库所有，绝不能连带删掉。"""
     if not rel:
         return None
-    if not rel.replace("\\", "/").startswith("logos/"):
+    # translate 后按 v2 前缀判定自有上传文件；resolve_rel 自带 DATA_DIR 包含校验
+    # （logos/../x 之类穿越值未来若入库也不致越界删/读），库内引用（transfer/）不匹配
+    if not data_dirs.translate_rel(rel.replace("\\", "/")).startswith(data_dirs.AVATARS + "/"):
         return None
-    path = (Path(settings.DATA_DIR) / rel).resolve()
-    # 前缀校验之外再卡一道 DATA_DIR 包含关系（logos/../x 之类穿越值未来若入库也不致越界删/读）
-    try:
-        path.relative_to(Path(settings.DATA_DIR).resolve())
-    except ValueError:
-        return None
-    return path
+    return data_dirs.resolve_rel(rel)
 
 
 def _soft_deleted(db: Session, user: User, model, extra=None):

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "iHub"
     # 后端版本：与 Web 前端版本同步递增（发版时一起改），版本更新检查用
-    APP_VERSION: str = "1.6.9"
+    APP_VERSION: str = "1.7.0"
 
     # 数据目录：SQLite 数据库、附件、密钥都放这里，Docker 挂载卷指向它
     # 默认落在仓库内 iHub/data（与 docker-compose 的 ./data 挂载点一致）
