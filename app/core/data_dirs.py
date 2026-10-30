@@ -36,6 +36,7 @@ NAV_LOGOS = "ihub_nav_logos"
 ATTACHMENTS = "ihub_attachments"
 BG = "ihub_bg"  # 登录背景图
 TRANSFER = "ihub_transfer"
+BRAND_ICONS = "ihub_brand_icons"  # 开源品牌图标库（管理员下载，实例级共享）
 CACHE = "ihub_cache"
 SEED_COVERS = f"{CACHE}/seed_covers"
 TMP = f"{CACHE}/tmp"

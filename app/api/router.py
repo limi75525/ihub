@@ -6,6 +6,7 @@ from app.api.v1 import (
     books,
     devices,
     docker,
+    brand,
     logos,
     messages,
     music,
@@ -28,6 +29,7 @@ api_router.include_router(devices.router)
 api_router.include_router(users.router)
 api_router.include_router(sources.router)
 api_router.include_router(logos.router)
+api_router.include_router(brand.router)
 api_router.include_router(notifications.router)
 api_router.include_router(messages.router)
 api_router.include_router(transfer.router)

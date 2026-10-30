@@ -1,0 +1,1751 @@
+{
+ "version": 1,
+ "note": "随 iHub 发布的中文别名与域名映射，用于图标库匹配；slug 以 simple-icons / devicon 官方名为准。",
+ "entries": {
+  "simple-icons": {
+   "taobao": {
+    "zh": [
+     "淘宝",
+     "淘宝网"
+    ],
+    "domains": [
+     "taobao.com"
+    ]
+   },
+   "alipay": {
+    "zh": [
+     "支付宝"
+    ],
+    "domains": [
+     "alipay.com"
+    ]
+   },
+   "meituan": {
+    "zh": [
+     "美团"
+    ],
+    "domains": [
+     "meituan.com"
+    ]
+   },
+   "dazhongdianping": {
+    "zh": [
+     "大众点评",
+     "点评"
+    ],
+    "domains": [
+     "dianping.com"
+    ]
+   },
+   "xiaohongshu": {
+    "zh": [
+     "小红书"
+    ],
+    "domains": [
+     "xiaohongshu.com"
+    ]
+   },
+   "zhihu": {
+    "zh": [
+     "知乎"
+    ],
+    "domains": [
+     "zhihu.com"
+    ]
+   },
+   "douban": {
+    "zh": [
+     "豆瓣"
+    ],
+    "domains": [
+     "douban.com"
+    ]
+   },
+   "doubanread": {
+    "zh": [
+     "豆瓣阅读"
+    ],
+    "domains": [
+     "read.douban.com"
+    ]
+   },
+   "bilibili": {
+    "zh": [
+     "B站",
+     "哔哩哔哩",
+     "小破站"
+    ],
+    "domains": [
+     "bilibili.com",
+     "b23.tv"
+    ]
+   },
+   "kuaishou": {
+    "zh": [
+     "快手"
+    ],
+    "domains": [
+     "kuaishou.com"
+    ]
+   },
+   "tiktok": {
+    "zh": [
+     "抖音",
+     "TikTok"
+    ],
+    "domains": [
+     "douyin.com",
+     "tiktok.com"
+    ]
+   },
+   "sinaweibo": {
+    "zh": [
+     "微博",
+     "新浪微博"
+    ],
+    "domains": [
+     "weibo.com",
+     "weibo.cn"
+    ]
+   },
+   "qq": {
+    "zh": [
+     "QQ",
+     "腾讯QQ"
+    ],
+    "domains": [
+     "qq.com"
+    ]
+   },
+   "wechat": {
+    "zh": [
+     "微信"
+    ],
+    "domains": [
+     "weixin.qq.com",
+     "wechat.com"
+    ]
+   },
+   "alibabacloud": {
+    "zh": [
+     "阿里云"
+    ],
+    "domains": [
+     "aliyun.com"
+    ]
+   },
+   "alibabadotcom": {
+    "zh": [
+     "阿里巴巴",
+     "1688"
+    ],
+    "domains": [
+     "1688.com"
+    ]
+   },
+   "baidu": {
+    "zh": [
+     "百度"
+    ],
+    "domains": [
+     "baidu.com"
+    ]
+   },
+   "bytedance": {
+    "zh": [
+     "字节跳动",
+     "字节"
+    ],
+    "domains": [
+     "bytedance.com"
+    ]
+   },
+   "csdn": {
+    "zh": [
+     "CSDN"
+    ],
+    "domains": [
+     "csdn.net"
+    ]
+   },
+   "gitee": {
+    "zh": [
+     "码云",
+     "Gitee"
+    ],
+    "domains": [
+     "gitee.com"
+    ]
+   },
+   "juejin": {
+    "zh": [
+     "掘金"
+    ],
+    "domains": [
+     "juejin.cn"
+    ]
+   },
+   "neteasecloudmusic": {
+    "zh": [
+     "网易云音乐",
+     "网易云"
+    ],
+    "domains": [
+     "music.163.com"
+    ]
+   },
+   "mihoyo": {
+    "zh": [
+     "米哈游",
+     "原神"
+    ],
+    "domains": [
+     "mihoyo.com",
+     "hoyoverse.com"
+    ]
+   },
+   "tripdotcom": {
+    "zh": [
+     "携程",
+     "Trip.com"
+    ],
+    "domains": [
+     "ctrip.com",
+     "trip.com"
+    ]
+   },
+   "airchina": {
+    "zh": [
+     "中国国航",
+     "国航"
+    ],
+    "domains": [
+     "airchina.com.cn"
+    ]
+   },
+   "wegame": {
+    "zh": [
+     "腾讯游戏",
+     "WeGame"
+    ],
+    "domains": [
+     "wegame.com.cn"
+    ]
+   },
+   "appgallery": {
+    "zh": [
+     "华为应用市场"
+    ],
+    "domains": [
+     "appgallery.huawei.com"
+    ]
+   },
+   "zcool": {
+    "zh": [
+     "站酷"
+    ],
+    "domains": [
+     "zcool.com.cn"
+    ]
+   },
+   "modelscope": {
+    "zh": [
+     "魔搭",
+     "ModelScope"
+    ],
+    "domains": [
+     "modelscope.cn"
+    ]
+   },
+   "moonshotai": {
+    "zh": [
+     "月之暗面",
+     "Kimi"
+    ],
+    "domains": [
+     "moonshot.cn",
+     "kimi.com"
+    ]
+   },
+   "zdotai": {
+    "zh": [
+     "智谱",
+     "智谱清言",
+     "ChatGLM"
+    ],
+    "domains": [
+     "zhipuai.cn",
+     "chatglm.cn"
+    ]
+   },
+   "luogu": {
+    "zh": [
+     "洛谷"
+    ],
+    "domains": [
+     "luogu.com.cn"
+    ]
+   },
+   "paddlepaddle": {
+    "zh": [
+     "飞桨"
+    ],
+    "domains": [
+     "paddlepaddle.org.cn"
+    ]
+   },
+   "gamescience": {
+    "zh": [
+     "游戏科学",
+     "黑神话悟空"
+    ],
+    "domains": [
+     "gamesci.cn"
+    ]
+   },
+   "1panel": {
+    "zh": [
+     "1Panel",
+     "服务器面板"
+    ],
+    "domains": [
+     "1panel.cn"
+    ]
+   },
+   "rainyun": {
+    "zh": [
+     "雨云"
+    ],
+    "domains": [
+     "rainyun.com"
+    ]
+   },
+   "codebuddy": {
+    "zh": [
+     "CodeBuddy"
+    ],
+    "domains": [
+     "codebuddy.cn"
+    ]
+   },
+   "testin": {
+    "zh": [
+     "云测",
+     "Testin"
+    ],
+    "domains": [
+     "testin.cn"
+    ]
+   },
+   "huawei": {
+    "zh": [
+     "华为"
+    ],
+    "domains": [
+     "huawei.com"
+    ]
+   },
+   "honor": {
+    "zh": [
+     "荣耀"
+    ],
+    "domains": [
+     "honor.com"
+    ]
+   },
+   "xiaomi": {
+    "zh": [
+     "小米"
+    ],
+    "domains": [
+     "mi.com",
+     "xiaomi.com"
+    ]
+   },
+   "oppo": {
+    "zh": [
+     "OPPO"
+    ],
+    "domains": [
+     "oppo.com"
+    ]
+   },
+   "vivo": {
+    "zh": [
+     "vivo"
+    ],
+    "domains": [
+     "vivo.com"
+    ]
+   },
+   "meizu": {
+    "zh": [
+     "魅族"
+    ],
+    "domains": [
+     "meizu.com"
+    ]
+   },
+   "dji": {
+    "zh": [
+     "大疆"
+    ],
+    "domains": [
+     "dji.com"
+    ]
+   },
+   "oneplus": {
+    "zh": [
+     "一加"
+    ],
+    "domains": [
+     "oneplus.com"
+    ]
+   },
+   "lenovo": {
+    "zh": [
+     "联想"
+    ],
+    "domains": [
+     "lenovo.com"
+    ]
+   },
+   "jellyfin": {
+    "zh": [
+     "媒体库",
+     "影视服务器"
+    ],
+    "domains": [
+     "jellyfin.org"
+    ]
+   },
+   "plex": {
+    "zh": [
+     "Plex",
+     "影视服务器"
+    ],
+    "domains": [
+     "plex.tv"
+    ]
+   },
+   "emby": {
+    "zh": [
+     "Emby",
+     "影视服务器"
+    ],
+    "domains": [
+     "emby.media"
+    ]
+   },
+   "qbittorrent": {
+    "zh": [
+     "qBittorrent",
+     "下载工具"
+    ],
+    "domains": [
+     "qbittorrent.org"
+    ]
+   },
+   "transmission": {
+    "zh": [
+     "Transmission",
+     "下载工具"
+    ],
+    "domains": [
+     "transmissionbt.com"
+    ]
+   },
+   "deluge": {
+    "zh": [
+     "Deluge",
+     "下载工具"
+    ],
+    "domains": [
+     "deluge-torrent.org"
+    ]
+   },
+   "sonarr": {
+    "zh": [
+     "剧集管理"
+    ],
+    "domains": [
+     "sonarr.tv"
+    ]
+   },
+   "radarr": {
+    "zh": [
+     "电影管理"
+    ],
+    "domains": [
+     "radarr.video"
+    ]
+   },
+   "synology": {
+    "zh": [
+     "群晖"
+    ],
+    "domains": [
+     "synology.com",
+     "synology.cn"
+    ]
+   },
+   "qnap": {
+    "zh": [
+     "威联通"
+    ],
+    "domains": [
+     "qnap.com"
+    ]
+   },
+   "truenas": {
+    "zh": [
+     "TrueNAS",
+     "存储系统"
+    ],
+    "domains": [
+     "truenas.com"
+    ]
+   },
+   "unraid": {
+    "zh": [
+     "Unraid",
+     "存储系统"
+    ],
+    "domains": [
+     "unraid.net"
+    ]
+   },
+   "freenas": {
+    "zh": [
+     "FreeNAS",
+     "存储系统"
+    ],
+    "domains": [
+     "freenas.org"
+    ]
+   },
+   "portainer": {
+    "zh": [
+     "Portainer",
+     "容器管理"
+    ],
+    "domains": [
+     "portainer.io"
+    ]
+   },
+   "homeassistant": {
+    "zh": [
+     "家庭助理",
+     "智能家居"
+    ],
+    "domains": [
+     "home-assistant.io"
+    ]
+   },
+   "nextcloud": {
+    "zh": [
+     "Nextcloud",
+     "私有云盘"
+    ],
+    "domains": [
+     "nextcloud.com"
+    ]
+   },
+   "immich": {
+    "zh": [
+     "Immich",
+     "照片备份"
+    ],
+    "domains": [
+     "immich.app"
+    ]
+   },
+   "alist": {
+    "zh": [
+     "AList",
+     "网盘挂载"
+    ],
+    "domains": [
+     "alist.nn.ci",
+     "alistgo.com"
+    ]
+   },
+   "audiobookshelf": {
+    "zh": [
+     "有声书"
+    ],
+    "domains": [
+     "audiobookshelf.org"
+    ]
+   },
+   "minio": {
+    "zh": [
+     "MinIO",
+     "对象存储"
+    ],
+    "domains": [
+     "min.io"
+    ]
+   },
+   "vaultwarden": {
+    "zh": [
+     "Vaultwarden",
+     "密码库"
+    ],
+    "domains": [
+     "vaultwarden.com"
+    ]
+   },
+   "bitwarden": {
+    "zh": [
+     "Bitwarden",
+     "密码库"
+    ],
+    "domains": [
+     "bitwarden.com"
+    ]
+   },
+   "gitea": {
+    "zh": [
+     "Gitea",
+     "代码托管"
+    ],
+    "domains": [
+     "gitea.com"
+    ]
+   },
+   "forgejo": {
+    "zh": [
+     "Forgejo",
+     "代码托管"
+    ],
+    "domains": [
+     "forgejo.org"
+    ]
+   },
+   "drone": {
+    "zh": [
+     "Drone CI",
+     "流水线"
+    ],
+    "domains": [
+     "drone.io"
+    ]
+   },
+   "jenkins": {
+    "zh": [
+     "Jenkins",
+     "流水线"
+    ],
+    "domains": [
+     "jenkins.io"
+    ]
+   },
+   "grafana": {
+    "zh": [
+     "Grafana",
+     "监控面板"
+    ],
+    "domains": [
+     "grafana.com"
+    ]
+   },
+   "prometheus": {
+    "zh": [
+     "Prometheus",
+     "监控"
+    ],
+    "domains": [
+     "prometheus.io"
+    ]
+   },
+   "uptimekuma": {
+    "zh": [
+     "Uptime Kuma",
+     "服务监控",
+     "探针"
+    ],
+    "domains": [
+     "uptime.kuma.pet"
+    ]
+   },
+   "pihole": {
+    "zh": [
+     "Pi-hole",
+     "广告拦截"
+    ],
+    "domains": [
+     "pi-hole.net"
+    ]
+   },
+   "openwrt": {
+    "zh": [
+     "OpenWrt",
+     "软路由"
+    ],
+    "domains": [
+     "openwrt.org"
+    ]
+   },
+   "mikrotik": {
+    "zh": [
+     "MikroTik",
+     "路由器"
+    ],
+    "domains": [
+     "mikrotik.com"
+    ]
+   },
+   "tailscale": {
+    "zh": [
+     "Tailscale",
+     "内网穿透"
+    ],
+    "domains": [
+     "tailscale.com"
+    ]
+   },
+   "zerotier": {
+    "zh": [
+     "ZeroTier",
+     "内网穿透"
+    ],
+    "domains": [
+     "zerotier.com"
+    ]
+   },
+   "wireguard": {
+    "zh": [
+     "WireGuard",
+     "VPN"
+    ],
+    "domains": [
+     "wireguard.com"
+    ]
+   },
+   "openvpn": {
+    "zh": [
+     "OpenVPN",
+     "VPN"
+    ],
+    "domains": [
+     "openvpn.net"
+    ]
+   },
+   "nginx": {
+    "zh": [
+     "Nginx",
+     "反向代理"
+    ],
+    "domains": [
+     "nginx.org",
+     "nginx.com"
+    ]
+   },
+   "caddy": {
+    "zh": [
+     "Caddy",
+     "反向代理"
+    ],
+    "domains": [
+     "caddyserver.com"
+    ]
+   },
+   "docker": {
+    "zh": [
+     "Docker",
+     "容器"
+    ],
+    "domains": [
+     "docker.com"
+    ]
+   },
+   "kubernetes": {
+    "zh": [
+     "K8s",
+     "容器编排"
+    ],
+    "domains": [
+     "kubernetes.io"
+    ]
+   },
+   "proxmox": {
+    "zh": [
+     "Proxmox",
+     "虚拟化"
+    ],
+    "domains": [
+     "proxmox.com"
+    ]
+   },
+   "opnsense": {
+    "zh": [
+     "OPNsense",
+     "防火墙"
+    ],
+    "domains": [
+     "opnsense.org"
+    ]
+   },
+   "pfsense": {
+    "zh": [
+     "pfSense",
+     "防火墙"
+    ],
+    "domains": [
+     "pfsense.org"
+    ]
+   },
+   "google": {
+    "zh": [
+     "谷歌"
+    ],
+    "domains": [
+     "google.com"
+    ]
+   },
+   "googlechrome": {
+    "zh": [
+     "Chrome",
+     "谷歌浏览器"
+    ],
+    "domains": [
+     "google.com"
+    ]
+   },
+   "gmail": {
+    "zh": [
+     "谷歌邮箱"
+    ],
+    "domains": [
+     "gmail.com",
+     "mail.google.com"
+    ]
+   },
+   "googledrive": {
+    "zh": [
+     "谷歌云盘"
+    ],
+    "domains": [
+     "drive.google.com"
+    ]
+   },
+   "youtube": {
+    "zh": [
+     "油管"
+    ],
+    "domains": [
+     "youtube.com",
+     "youtu.be"
+    ]
+   },
+   "youtubemusic": {
+    "zh": [
+     "油管音乐"
+    ],
+    "domains": [
+     "music.youtube.com"
+    ]
+   },
+   "netflix": {
+    "zh": [
+     "奈飞",
+     "网飞"
+    ],
+    "domains": [
+     "netflix.com"
+    ]
+   },
+   "spotify": {
+    "zh": [
+     "Spotify",
+     "音乐"
+    ],
+    "domains": [
+     "spotify.com"
+    ]
+   },
+   "apple": {
+    "zh": [
+     "苹果"
+    ],
+    "domains": [
+     "apple.com"
+    ]
+   },
+   "applemusic": {
+    "zh": [
+     "苹果音乐"
+    ],
+    "domains": [
+     "music.apple.com"
+    ]
+   },
+   "linux": {
+    "zh": [
+     "Linux",
+     "系统"
+    ],
+    "domains": [
+     "linux.org"
+    ]
+   },
+   "ubuntu": {
+    "zh": [
+     "Ubuntu",
+     "系统"
+    ],
+    "domains": [
+     "ubuntu.com"
+    ]
+   },
+   "debian": {
+    "zh": [
+     "Debian",
+     "系统"
+    ],
+    "domains": [
+     "debian.org"
+    ]
+   },
+   "archlinux": {
+    "zh": [
+     "Arch",
+     "系统"
+    ],
+    "domains": [
+     "archlinux.org"
+    ]
+   },
+   "fedora": {
+    "zh": [
+     "Fedora",
+     "系统"
+    ],
+    "domains": [
+     "fedoraproject.org"
+    ]
+   },
+   "android": {
+    "zh": [
+     "安卓",
+     "系统"
+    ],
+    "domains": [
+     "android.com"
+    ]
+   },
+   "firefox": {
+    "zh": [
+     "火狐",
+     "浏览器"
+    ],
+    "domains": [
+     "mozilla.org"
+    ]
+   },
+   "mozilla": {
+    "zh": [
+     "谋智"
+    ],
+    "domains": [
+     "mozilla.org"
+    ]
+   },
+   "telegram": {
+    "zh": [
+     "电报",
+     "TG"
+    ],
+    "domains": [
+     "telegram.org",
+     "t.me"
+    ]
+   },
+   "discord": {
+    "zh": [
+     "Discord",
+     "群聊"
+    ],
+    "domains": [
+     "discord.com"
+    ]
+   },
+   "whatsapp": {
+    "zh": [
+     "WhatsApp",
+     "聊天"
+    ],
+    "domains": [
+     "whatsapp.com"
+    ]
+   },
+   "x": {
+    "zh": [
+     "推特",
+     "Twitter"
+    ],
+    "domains": [
+     "x.com",
+     "twitter.com"
+    ]
+   },
+   "facebook": {
+    "zh": [
+     "脸书"
+    ],
+    "domains": [
+     "facebook.com"
+    ]
+   },
+   "instagram": {
+    "zh": [
+     "Instagram",
+     "IG"
+    ],
+    "domains": [
+     "instagram.com"
+    ]
+   },
+   "reddit": {
+    "zh": [
+     "Reddit",
+     "论坛"
+    ],
+    "domains": [
+     "reddit.com"
+    ]
+   },
+   "steam": {
+    "zh": [
+     "Steam",
+     "游戏平台"
+    ],
+    "domains": [
+     "steampowered.com"
+    ]
+   },
+   "epicgames": {
+    "zh": [
+     "Epic",
+     "游戏平台"
+    ],
+    "domains": [
+     "epicgames.com"
+    ]
+   },
+   "notion": {
+    "zh": [
+     "Notion",
+     "笔记"
+    ],
+    "domains": [
+     "notion.so"
+    ]
+   },
+   "figma": {
+    "zh": [
+     "Figma",
+     "设计"
+    ],
+    "domains": [
+     "figma.com"
+    ]
+   },
+   "anthropic": {
+    "zh": [
+     "Anthropic"
+    ],
+    "domains": [
+     "anthropic.com"
+    ]
+   },
+   "claude": {
+    "zh": [
+     "Claude"
+    ],
+    "domains": [
+     "claude.ai"
+    ]
+   },
+   "huggingface": {
+    "zh": [
+     "Hugging Face",
+     "抱抱脸"
+    ],
+    "domains": [
+     "huggingface.co"
+    ]
+   },
+   "github": {
+    "zh": [
+     "代码托管"
+    ],
+    "domains": [
+     "github.com"
+    ]
+   },
+   "gitlab": {
+    "zh": [
+     "GitLab",
+     "代码托管"
+    ],
+    "domains": [
+     "gitlab.com"
+    ]
+   },
+   "bitbucket": {
+    "zh": [
+     "Bitbucket",
+     "代码托管"
+    ],
+    "domains": [
+     "bitbucket.org"
+    ]
+   },
+   "cloudflare": {
+    "zh": [
+     "Cloudflare",
+     "CDN"
+    ],
+    "domains": [
+     "cloudflare.com"
+    ]
+   },
+   "vercel": {
+    "zh": [
+     "Vercel",
+     "部署"
+    ],
+    "domains": [
+     "vercel.com"
+    ]
+   },
+   "netlify": {
+    "zh": [
+     "Netlify",
+     "部署"
+    ],
+    "domains": [
+     "netlify.com"
+    ]
+   },
+   "digitalocean": {
+    "zh": [
+     "DigitalOcean",
+     "云主机"
+    ],
+    "domains": [
+     "digitalocean.com"
+    ]
+   },
+   "npm": {
+    "zh": [
+     "Node 包管理"
+    ],
+    "domains": [
+     "npmjs.com"
+    ]
+   },
+   "pypi": {
+    "zh": [
+     "Python 包管理"
+    ],
+    "domains": [
+     "pypi.org"
+    ]
+   },
+   "python": {
+    "zh": [
+     "Python",
+     "编程"
+    ],
+    "domains": [
+     "python.org"
+    ]
+   },
+   "nodedotjs": {
+    "zh": [
+     "Node.js",
+     "Node"
+    ],
+    "domains": [
+     "nodejs.org"
+    ]
+   },
+   "react": {
+    "zh": [
+     "React",
+     "前端框架"
+    ],
+    "domains": [
+     "react.dev"
+    ]
+   },
+   "vuedotjs": {
+    "zh": [
+     "Vue",
+     "前端框架"
+    ],
+    "domains": [
+     "vuejs.org"
+    ]
+   },
+   "angular": {
+    "zh": [
+     "Angular",
+     "前端框架"
+    ],
+    "domains": [
+     "angular.dev"
+    ]
+   },
+   "svelte": {
+    "zh": [
+     "Svelte",
+     "前端框架"
+    ],
+    "domains": [
+     "svelte.dev"
+    ]
+   },
+   "typescript": {
+    "zh": [
+     "TS",
+     "编程"
+    ],
+    "domains": [
+     "typescriptlang.org"
+    ]
+   },
+   "javascript": {
+    "zh": [
+     "JS",
+     "编程"
+    ]
+   },
+   "go": {
+    "zh": [
+     "Golang",
+     "编程"
+    ],
+    "domains": [
+     "go.dev"
+    ]
+   },
+   "rust": {
+    "zh": [
+     "Rust",
+     "编程"
+    ],
+    "domains": [
+     "rust-lang.org"
+    ]
+   },
+   "kotlin": {
+    "zh": [
+     "Kotlin",
+     "编程"
+    ],
+    "domains": [
+     "kotlinlang.org"
+    ]
+   },
+   "swift": {
+    "zh": [
+     "Swift",
+     "编程"
+    ],
+    "domains": [
+     "swift.org"
+    ]
+   },
+   "php": {
+    "zh": [
+     "PHP",
+     "编程"
+    ],
+    "domains": [
+     "php.net"
+    ]
+   },
+   "ruby": {
+    "zh": [
+     "Ruby",
+     "编程"
+    ],
+    "domains": [
+     "ruby-lang.org"
+    ]
+   },
+   "mysql": {
+    "zh": [
+     "MySQL",
+     "数据库"
+    ],
+    "domains": [
+     "mysql.com"
+    ]
+   },
+   "postgresql": {
+    "zh": [
+     "PG",
+     "PostgreSQL",
+     "数据库"
+    ],
+    "domains": [
+     "postgresql.org"
+    ]
+   },
+   "redis": {
+    "zh": [
+     "Redis",
+     "缓存"
+    ],
+    "domains": [
+     "redis.io"
+    ]
+   },
+   "mongodb": {
+    "zh": [
+     "MongoDB",
+     "数据库"
+    ],
+    "domains": [
+     "mongodb.com"
+    ]
+   },
+   "sqlite": {
+    "zh": [
+     "SQLite",
+     "数据库"
+    ],
+    "domains": [
+     "sqlite.org"
+    ]
+   },
+   "elasticsearch": {
+    "zh": [
+     "ES",
+     "搜索"
+    ],
+    "domains": [
+     "elastic.co"
+    ]
+   },
+   "apachekafka": {
+    "zh": [
+     "Kafka",
+     "消息队列"
+    ],
+    "domains": [
+     "kafka.apache.org"
+    ]
+   },
+   "rabbitmq": {
+    "zh": [
+     "RabbitMQ",
+     "消息队列"
+    ],
+    "domains": [
+     "rabbitmq.com"
+    ]
+   },
+   "nvidia": {
+    "zh": [
+     "英伟达"
+    ],
+    "domains": [
+     "nvidia.com"
+    ]
+   },
+   "intel": {
+    "zh": [
+     "英特尔"
+    ],
+    "domains": [
+     "intel.com"
+    ]
+   },
+   "amd": {
+    "zh": [
+     "AMD"
+    ],
+    "domains": [
+     "amd.com"
+    ]
+   },
+   "samsung": {
+    "zh": [
+     "三星"
+    ],
+    "domains": [
+     "samsung.com"
+    ]
+   },
+   "sony": {
+    "zh": [
+     "索尼"
+    ],
+    "domains": [
+     "sony.com"
+    ]
+   },
+   "cisco": {
+    "zh": [
+     "思科"
+    ],
+    "domains": [
+     "cisco.com"
+    ]
+   },
+   "dell": {
+    "zh": [
+     "戴尔"
+    ],
+    "domains": [
+     "dell.com"
+    ]
+   },
+   "hp": {
+    "zh": [
+     "惠普"
+    ],
+    "domains": [
+     "hp.com"
+    ]
+   },
+   "sap": {
+    "zh": [
+     "SAP"
+    ],
+    "domains": [
+     "sap.com"
+    ]
+   },
+   "vmware": {
+    "zh": [
+     "VMware",
+     "虚拟化"
+    ],
+    "domains": [
+     "vmware.com"
+    ]
+   },
+   "virtualbox": {
+    "zh": [
+     "VirtualBox",
+     "虚拟化"
+    ],
+    "domains": [
+     "virtualbox.org"
+    ]
+   },
+   "wikipedia": {
+    "zh": [
+     "维基百科"
+    ],
+    "domains": [
+     "wikipedia.org"
+    ]
+   },
+   "dropbox": {
+    "zh": [
+     "Dropbox",
+     "网盘"
+    ],
+    "domains": [
+     "dropbox.com"
+    ]
+   }
+  },
+  "devicon": {
+   "docker": {
+    "zh": [
+     "Docker",
+     "容器"
+    ]
+   },
+   "python": {
+    "zh": [
+     "Python",
+     "编程"
+    ]
+   },
+   "nginx": {
+    "zh": [
+     "Nginx",
+     "反向代理"
+    ]
+   },
+   "linux": {
+    "zh": [
+     "Linux",
+     "系统"
+    ]
+   },
+   "ubuntu": {
+    "zh": [
+     "Ubuntu",
+     "系统"
+    ]
+   },
+   "debian": {
+    "zh": [
+     "Debian",
+     "系统"
+    ]
+   },
+   "github": {
+    "zh": [
+     "代码托管"
+    ]
+   },
+   "gitlab": {
+    "zh": [
+     "GitLab",
+     "代码托管"
+    ]
+   },
+   "vuejs": {
+    "zh": [
+     "Vue",
+     "前端框架"
+    ]
+   },
+   "react": {
+    "zh": [
+     "React",
+     "前端框架"
+    ]
+   },
+   "angular": {
+    "zh": [
+     "Angular",
+     "前端框架"
+    ]
+   },
+   "nodejs": {
+    "zh": [
+     "Node.js"
+    ]
+   },
+   "go": {
+    "zh": [
+     "Golang",
+     "编程"
+    ]
+   },
+   "rust": {
+    "zh": [
+     "Rust",
+     "编程"
+    ]
+   },
+   "kotlin": {
+    "zh": [
+     "Kotlin",
+     "编程"
+    ]
+   },
+   "swift": {
+    "zh": [
+     "Swift",
+     "编程"
+    ]
+   },
+   "php": {
+    "zh": [
+     "PHP",
+     "编程"
+    ]
+   },
+   "ruby": {
+    "zh": [
+     "Ruby",
+     "编程"
+    ]
+   },
+   "mysql": {
+    "zh": [
+     "MySQL",
+     "数据库"
+    ]
+   },
+   "postgresql": {
+    "zh": [
+     "PostgreSQL",
+     "数据库"
+    ]
+   },
+   "redis": {
+    "zh": [
+     "Redis",
+     "缓存"
+    ]
+   },
+   "mongodb": {
+    "zh": [
+     "MongoDB",
+     "数据库"
+    ]
+   },
+   "kubernetes": {
+    "zh": [
+     "K8s",
+     "容器编排"
+    ]
+   },
+   "jenkins": {
+    "zh": [
+     "Jenkins",
+     "流水线"
+    ]
+   },
+   "grafana": {
+    "zh": [
+     "Grafana",
+     "监控"
+    ]
+   },
+   "prometheus": {
+    "zh": [
+     "Prometheus",
+     "监控"
+    ]
+   },
+   "android": {
+    "zh": [
+     "安卓",
+     "系统"
+    ]
+   },
+   "apple": {
+    "zh": [
+     "苹果"
+    ],
+    "domains": [
+     "apple.com"
+    ]
+   },
+   "amazonwebservices": {
+    "zh": [
+     "亚马逊云",
+     "AWS"
+    ],
+    "domains": [
+     "aws.amazon.com"
+    ]
+   },
+   "azure": {
+    "zh": [
+     "微软云",
+     "Azure"
+    ],
+    "domains": [
+     "azure.microsoft.com"
+    ]
+   },
+   "linkedin": {
+    "zh": [
+     "领英"
+    ],
+    "domains": [
+     "linkedin.com"
+    ]
+   },
+   "oracle": {
+    "zh": [
+     "甲骨文"
+    ],
+    "domains": [
+     "oracle.com"
+    ]
+   },
+   "windows11": {
+    "zh": [
+     "微软系统",
+     "Windows"
+    ],
+    "domains": [
+     "microsoft.com"
+    ]
+   },
+   "microsoftsqlserver": {
+    "zh": [
+     "SQL Server",
+     "数据库"
+    ]
+   },
+   "jira": {
+    "zh": [
+     "Jira",
+     "项目管理"
+    ],
+    "domains": [
+     "atlassian.com"
+    ]
+   },
+   "confluence": {
+    "zh": [
+     "Confluence",
+     "文档"
+    ],
+    "domains": [
+     "atlassian.com"
+    ]
+   },
+   "slack": {
+    "zh": [
+     "Slack",
+     "群聊"
+    ],
+    "domains": [
+     "slack.com"
+    ]
+   },
+   "trello": {
+    "zh": [
+     "Trello",
+     "看板"
+    ],
+    "domains": [
+     "trello.com"
+    ]
+   },
+   "bitbucket": {
+    "zh": [
+     "Bitbucket",
+     "代码托管"
+    ],
+    "domains": [
+     "bitbucket.org"
+    ]
+   },
+   "git": {
+    "zh": [
+     "Git",
+     "版本控制"
+    ]
+   },
+   "vim": {
+    "zh": [
+     "Vim",
+     "编辑器"
+    ]
+   },
+   "vscode": {
+    "zh": [
+     "VS Code",
+     "编辑器"
+    ]
+   },
+   "visualstudio": {
+    "zh": [
+     "Visual Studio",
+     "IDE"
+    ]
+   }
+  }
+ }
+}
