@@ -622,6 +622,94 @@ class MpClient:
             return out
         return []
 
+    def list_dirs(self, path: str, keyword: str = "", count: int = 50) -> list[dict]:
+        """列出 MP 视角下某目录的子目录（storage/list，type=dir）。"""
+        params: dict = {"page": 1, "count": count}
+        if keyword:
+            params["keyword"] = keyword
+        value = self._api(
+            "POST",
+            "/api/v1/storage/list",
+            params=params,
+            json_body={"path": path or "/", "storage": "local", "type": "dir"},
+        )
+        data = unwrap_mp(value)
+        if isinstance(data, dict):
+            data = data.get("items") or data.get("data") or []
+        return [x for x in (data or []) if isinstance(x, dict)]
+
+    def dir_state(self, path: str) -> str:
+        """目录在 MoviePilot 视角下的状态（与 qB 共用同一挂载时即为同一文件系统）。
+
+        ok / missing（父目录在、目标不在）/ missing_parent（父目录都不可见）/ unknown（接口不可用）
+        """
+        import posixpath
+
+        path = (path or "").rstrip("/") or "/"
+        parent, name = posixpath.split(path)
+        if not name:
+            return "missing_parent"
+        if parent in ("", "/"):
+            parent_ok = True
+        else:
+            gp, pname = posixpath.split(parent)
+            try:
+                rows = self.list_dirs(gp or "/", keyword=pname, count=20)
+            except SeedError:
+                return "unknown"
+            parent_ok = any(
+                str(x.get("name") or "") == pname and str(x.get("type") or "dir") == "dir" for x in rows
+            )
+        if not parent_ok:
+            return "missing_parent"
+        try:
+            rows = self.list_dirs(parent or "/", keyword=name, count=20)
+        except SeedError:
+            return "unknown"
+        hit = any(str(x.get("name") or "") == name and str(x.get("type") or "dir") == "dir" for x in rows)
+        return "ok" if hit else "missing"
+
+    def transfer_directories(self) -> list[dict]:
+        """MP 的「目录配置」：每类媒体对应的下载目录（转媒体目标）与媒体库目录。
+
+        v3 走 /api/v1/storage/directories（含 media_type / download_path / library_path），
+        旧版回退 /api/v1/download/paths（只有 name/download_path）。"""
+        last_error: Exception | None = None
+        for path in ("/api/v1/storage/directories", "/api/v1/download/paths"):
+            try:
+                value = self._api("GET", path)
+            except SeedError as e:
+                if e.status_code == 404:
+                    last_error = e
+                    continue
+                raise
+            data = unwrap_mp(value)
+            if isinstance(data, dict):
+                data = data.get("items") or data.get("data") or []
+            out: list[dict] = []
+            seen: set[str] = set()
+            for item in data if isinstance(data, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                target = str(item.get("download_path") or item.get("save_path") or "").strip()
+                if not target.startswith("/"):
+                    continue
+                target = target.rstrip("/") or "/"
+                if target in seen:
+                    continue
+                seen.add(target)
+                out.append({
+                    "name": str(item.get("name") or "").strip(),
+                    "path": target,
+                    "media_type": str(item.get("media_type") or "").strip(),
+                    "library_path": str(item.get("library_path") or "").strip(),
+                })
+            if out:
+                return out
+        if last_error is not None:
+            return []
+        return []
+
     # ---- 搜索/发现/推荐 ----
     def search_title(
         self, keyword: str, *, mtype: str | None = None, sites: str | None = None, page: int = 1
@@ -662,7 +750,9 @@ class MpClient:
             timeout=15,
         )
 
-    def media_detail(self, media_id: str, media_source: str, type_name: str) -> dict:
+    def media_detail(
+        self, media_id: str, media_source: str, type_name: str, *, timeout: int | None = None
+    ) -> dict:
         """媒体详情（海报/宽幅背景/简介）；用历史记录里的 media_id + 来源查询。
 
         电视剧首查时 MP 会现拉 TMDB 的季/演职员信息，耗时可达十几秒，
@@ -676,7 +766,7 @@ class MpClient:
             "GET",
             f"/api/v1/media/{quote(mid, safe='')}",
             params={"media_source": source, "type_name": kind},
-            timeout=45,
+            timeout=timeout or 45,
         )
         data = unwrap_mp(value)
         return data if isinstance(data, dict) else {}
@@ -689,10 +779,11 @@ class MpClient:
         sources: list[str] | None = None,
         page: int = 1,
         count: int = 20,
+        api_type: str | None = None,
     ) -> list:
         # MP 的 media/search 只接受 media/music/collection/person，电影/剧集统一用 media
-        api_type = "music" if mtype == "music" else "media"
-        params: dict = {"title": title, "type": api_type, "page": page, "count": count}
+        kind = api_type or ("music" if mtype == "music" else "media")
+        params: dict = {"title": title, "type": kind, "page": page, "count": count}
         if sources:
             params["media_source"] = sources
         value = self._api("GET", "/api/v1/media/search", params=params, timeout=SEARCH_TIMEOUT)
@@ -709,6 +800,7 @@ class MpClient:
         sites: str | None = None,
         page: int = 1,
         count: int = 50,
+        timeout: int | None = None,
     ) -> list:
         quoted = quote(str(media_id), safe="")
         params = {
@@ -724,7 +816,7 @@ class MpClient:
             "GET",
             f"/api/v1/search/media/{quoted}",
             params=params,
-            timeout=SEARCH_TIMEOUT,
+            timeout=timeout or SEARCH_TIMEOUT,
         )
         data = unwrap_mp(value)
         if isinstance(data, dict):

@@ -19,6 +19,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -704,6 +705,98 @@ def qb_delete(
     return {"ok": True, "delete_files": body.delete_files}
 
 
+class TransferConfigIn(BaseModel):
+    """转媒体目录：留空表示回退环境变量默认值。"""
+    tv: str = Field(default="", max_length=256)
+    movie: str = Field(default="", max_length=256)
+
+
+def _mp_conn_optional(db: Session) -> SeedConnection | None:
+    """转媒体目录配置：MP 未配置/未开启时不影响读取当前目录设置。"""
+    return (
+        db.query(SeedConnection)
+        .filter(SeedConnection.kind == "moviepilot", SeedConnection.enabled.is_(True))
+        .order_by(SeedConnection.sort_order.asc(), SeedConnection.id.asc())
+        .first()
+    )
+
+
+def _transfer_config_out(conn: SeedConnection | None, db: Session) -> dict:
+    from app.models.system_setting import get_setting
+
+    dirs: list[dict] = []
+    note = ""
+    if conn is not None:
+        try:
+            dirs = cached(conn.id, "mp:transfer-dirs", 300.0, lambda: mp_client(conn).transfer_directories())
+        except SeedError as e:
+            note = e.message
+
+    return {
+        "tv": seed_transfer.target_path("tv"),
+        "movie": seed_transfer.target_path("movie"),
+        "saved": {
+            "tv": get_setting(seed_transfer.SETTING_KEYS["tv"]),
+            "movie": get_setting(seed_transfer.SETTING_KEYS["movie"]),
+        },
+        "defaults": dict(seed_transfer.TARGETS),
+        "directories": dirs,
+        "error": note,
+    }
+
+
+def _mp_dir_state(db: Session, path: str) -> str:
+    """转媒体目录校验（复用 seed_transfer 的检查：MP 与 qB 共用挂载时的存在性判断）。"""
+    state = seed_transfer.dir_state_for_path(path)
+    return "skip" if state in ("unknown", "unavailable") else state
+
+
+@router.get("/transfer/config")
+def transfer_config(
+    fresh: bool = Query(False),
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """转媒体目录配置 + MoviePilot 里配置的目录（用作下拉候选）。"""
+    conn = _mp_conn_optional(db)
+    if fresh and conn is not None:
+        cache_drop(conn.id, "mp:transfer-dirs")
+    return _transfer_config_out(conn, db)
+
+
+@router.put("/transfer/config")
+def save_transfer_config(
+    body: TransferConfigIn,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """保存转媒体目录（空 = 回退默认值）。目录必须是绝对路径。"""
+    from app.models.system_setting import set_setting
+
+    warnings: list[str] = []
+    labels = {"tv": "电视", "movie": "电影"}
+    for target, value in (("tv", body.tv), ("movie", body.movie)):
+        path = (value or "").strip().rstrip("/")
+        if path and not path.startswith("/"):
+            raise HTTPException(400, "目录必须是绝对路径（以 / 开头）")
+        if path:
+            state = _mp_dir_state(db, path)
+            if state == "missing_parent":
+                raise HTTPException(400, f"{labels[target]}目录「{path}」的上级目录不存在，请检查路径")
+            if state == "missing":
+                # 目录必须已存在：qB 的 move_storage 会自动建目录，这里拒绝以免替用户凭空创建
+                raise HTTPException(
+                    400,
+                    f"{labels[target]}目录「{path}」不存在，请先在文件系统创建后再保存",
+                )
+        set_setting(seed_transfer.SETTING_KEYS[target], path[:256])
+    audit.info(
+        "种子设置：user=%s op=transfer_dirs tv=%s movie=%s",
+        admin.username, body.tv.strip()[:120], body.movie.strip()[:120],
+    )
+    return {**_transfer_config_out(_mp_conn_optional(db), db), "warnings": warnings}
+
+
 @router.post("/transfer/scan")
 def transfer_scan(admin: User = Depends(get_current_admin)):
     """手动刷新触发一次 qB 转媒体扫描；有任务才启动后台轮询。"""
@@ -1136,6 +1229,20 @@ def _site_status(client) -> dict:
 
 
 _MEDIA_TYPE_CN = {"movie": "电影", "tv": "电视剧", "music": "音乐"}
+_ALL_MEDIA_API_TYPES = ("media", "music", "collection", "person")
+_SEASON_SUFFIX_RE = re.compile(
+    r"\s*(?:第[一二三四五六七八九十0-9]+季|Season\s*\d+|S\d{1,2})\s*$", re.I
+)
+
+
+def _seasonless_title(value: str) -> str:
+    """去掉标题末尾的季标记（第N季 / Season N / Sxx），用于跨语言、跨季匹配。"""
+    text = str(value or "").strip()
+    while True:
+        stripped = _SEASON_SUFFIX_RE.sub("", text).strip()
+        if stripped == text:
+            return text
+        text = stripped
 
 
 def _title_key(value: str) -> str:
@@ -1143,38 +1250,172 @@ def _title_key(value: str) -> str:
     return re.sub(r"[\s·・\-_:：,，.。'’\"“”]+", "", str(value or "")).lower()
 
 
-def _resolve_media(client, keyword: str, type_cn: str | None) -> dict | None:
-    """关键词 → 精确同名的媒体（MP 资源搜索的第一步）。
+def _seasonless_key(value: str) -> str:
+    """去掉「第N季 / Season N / Sxx」后再比对；只用于详情兜底，避免季条目抢在主媒体前面。"""
+    return _title_key(_seasonless_title(value))
 
-    站点资源往往只索引英文名/别名（如爱情公寓 → Ipartment / Ai Qing Gong Yu），
-    纯中文关键词走 /search/title 搜不到。MP 搜索页的做法是先解析 TMDB 媒体、
-    再按媒体 ID 搜站点。这里只认同名（宁缺毋滥）：搜发行组、分辨率等非媒体
-    关键词解析不出来，回退纯关键词搜索。
-    """
+
+def _media_title_values(media: dict) -> list[str]:
+    values = [
+        media.get("title"),
+        media.get("en_title"),
+        media.get("hk_title"),
+        media.get("tw_title"),
+        media.get("sg_title"),
+        media.get("original_title"),
+        media.get("original_name"),
+    ]
+    names = media.get("names")
+    if isinstance(names, list):
+        values.extend(names)
+    return [str(v) for v in values if v]
+
+
+def _media_ready(media: dict) -> bool:
+    return (
+        isinstance(media, dict)
+        and bool(media.get("media_id") or media.get("tmdb_id"))
+        and bool(media.get("media_source"))
+    )
+
+
+def _media_matches(media: dict, key: str, type_cn: str | None, *, seasonless: bool = False) -> bool:
+    if not _media_ready(media):
+        return False
+    if type_cn and str(media.get("type") or "") != type_cn:
+        return False
+    normalize = _seasonless_key if seasonless else _title_key
+    return any(normalize(v) == key for v in _media_title_values(media))
+
+
+def _media_confident(media: dict) -> bool:
+    """详情兜底只查高置信候选，避免把 HDR/FRDS 这类关键词误判成媒体。"""
     try:
-        medias = client.media_search(keyword, count=50)
-    except SeedError:
-        return None
+        popularity = float(media.get("popularity") or 0)
+    except (TypeError, ValueError):
+        popularity = 0.0
+    try:
+        votes = int(media.get("vote_count") or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    return popularity >= 1.0 or votes >= 10
+
+
+def _resolve_medias(
+    client, keyword: str, type_cn: str | None, api_types: tuple[str, ...]
+) -> list[dict]:
+    """关键词 → 同名媒体列表（MP 资源搜索的第一步）。
+
+    站点资源往往只索引英文名/别名（如爱情公寓 → Ipartment、黑帮领地 → MobLand），
+    纯中文关键词走 /search/title 搜不到。MP 搜索页的做法是先解析媒体、再按媒体 ID
+    搜站点。这里只认同名（宁缺毋滥）：搜发行组、分辨率等非媒体关键词解析不出来，
+    回退纯关键词搜索。
+
+    中文名可能只存在于媒体详情的 title/names 里（TMDB 主标题是英文时，
+    如黑帮领地 → MobLand），所以搜索摘要没有同名时会再查前几个高置信候选的详情。
+    """
     key = _title_key(keyword)
     if not key:
-        return None
-    for m in medias:
-        if not isinstance(m, dict):
+        return []
+    candidates: list[dict] = []
+    for api_type in api_types:
+        try:
+            found = client.media_search(keyword, count=50, api_type=api_type)
+        except (SeedError, HTTPException):
             continue
-        if type_cn and str(m.get("type") or "") != type_cn:
-            continue
-        if not m.get("media_id") and not m.get("tmdb_id"):
-            continue
-        names = (
-            m.get("title"),
-            m.get("en_title"),
-            m.get("hk_title"),
-            m.get("tw_title"),
-            m.get("sg_title"),
+        for media in found or []:
+            if not _media_ready(media):
+                continue
+            if type_cn and str(media.get("type") or "") != type_cn:
+                continue
+            candidates.append(media)
+    if not candidates:
+        return []
+
+    matched: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(media: dict) -> None:
+        ident = (
+            str(media.get("media_source") or ""),
+            str(media.get("media_id") or media.get("tmdb_id") or ""),
+            str(media.get("type") or ""),
         )
-        if any(_title_key(n) == key for n in names if n):
-            return m
-    return None
+        if not ident[1] or ident in seen:
+            return
+        seen.add(ident)
+        matched.append(media)
+
+    # 1) 搜索摘要自带标题（快）；「全部类型」会保留电影/剧集/音乐等同名结果。
+    for media in candidates:
+        if _media_matches(media, key, type_cn):
+            add(media)
+
+    # 2) 摘要没有同名时，先按媒体 ID 搜 1 条探 media_info（通常 1~3 秒，已带中文标题）；
+    #    站点没有任何结果时才退回详情（电视剧首查可能十几秒）。
+    if not matched:
+        probed = 0
+        seasonless = _seasonless_key(keyword)
+        for media in candidates:
+            if probed >= 2:
+                break
+            if not _media_confident(media):
+                continue
+            probed += 1
+            mid = str(media.get("media_id") or media.get("tmdb_id") or "")
+            source = str(media.get("media_source") or "")
+            kind = str(media.get("type") or "")
+            try:
+                probe = client.search_torrents(mid, source, mtype=kind, count=1)
+            except SeedError:
+                probe = []
+            info = probe[0].get("media_info") if probe and isinstance(probe[0], dict) else None
+            if isinstance(info, dict) and info:
+                merged = {**media, **info}
+                merged["media_source"] = info.get("media_source") or source
+                merged["media_id"] = info.get("media_id") or mid
+                if _media_matches(merged, seasonless, type_cn, seasonless=True):
+                    add(merged)
+                # media_info 已经是该 ID 的权威标题；不同名说明候选不对，不再拉慢详情
+                continue
+            try:
+                detail = client.media_detail(mid, source, kind, timeout=20)
+            except (SeedError, HTTPException):
+                continue
+            if not isinstance(detail, dict):
+                continue
+            merged = {**media, **detail}
+            merged["media_source"] = detail.get("media_source") or media.get("media_source")
+            merged["media_id"] = (
+                detail.get("media_id") or media.get("media_id") or detail.get("tmdb_id")
+            )
+            if _media_matches(merged, seasonless, type_cn, seasonless=True):
+                add(merged)
+
+    # 指定类型只查最匹配的一部；「全部」每种类型只查最匹配的一部
+    # （同一部剧的 TMDB/豆瓣重复条目会并发/串行打站点，全部查会把搜索拖到一分钟）。
+    if type_cn:
+        return matched[:1]
+    per_type: dict[str, dict] = {}
+    for media in matched:
+        kind = str(media.get("type") or "")
+        if kind not in per_type:
+            per_type[kind] = media
+    return list(per_type.values())[:4]
+
+
+def _torrent_marker(row: dict) -> tuple:
+    """跨媒体聚合时的去重键：优先 MP 的 torrent id/enclosure，其次站点+标题+体积。"""
+    torrent = row.get("torrent_info") if isinstance(row.get("torrent_info"), dict) else {}
+    ident = torrent.get("id") or torrent.get("enclosure") or torrent.get("page_url")
+    if ident:
+        return ("id", str(ident))
+    return (
+        "sig",
+        str(torrent.get("site") or row.get("site") or ""),
+        str(torrent.get("title") or row.get("title") or ""),
+        str(torrent.get("size") or row.get("size") or ""),
+    )
 
 
 @router.get("/mp/search")
@@ -1194,22 +1435,33 @@ def mp_search(
     conn = _mp_conn(db)
     client = mp_client(conn)
     type_cn = _MEDIA_TYPE_CN.get(type or "", "")
+    api_types = _ALL_MEDIA_API_TYPES if not type else (("music",) if type == "music" else ("media",))
+    medias = _resolve_medias(client, q, type_cn, api_types)
     rows: list = []
-    # 与 MP 搜索页同序：先解析媒体，按媒体 ID（含中英文别名）搜站点；
-    # 解析不出同名媒体（或该媒体无资源）时回退纯关键词搜索。
-    media = _resolve_media(client, q, type_cn) if type != "music" else None
-    if media:
+    seen_rows: set[tuple] = set()
+    # 与 MP 搜索页同序：先解析媒体，按媒体 ID（含中英文别名）搜站点。
+    # 「全部类型」会聚合电影/剧集/音乐等同名媒体的结果并去重；单类型只查最匹配的一部。
+    for media in medias:
         try:
-            rows = client.search_torrents(
+            found = client.search_torrents(
                 media.get("media_id") or media.get("tmdb_id"),
                 str(media.get("media_source") or "themoviedb"),
-                mtype=str(media.get("type") or type),
+                mtype=str(media.get("type") or type or ""),
                 sites=sites,
-                page=page,
-                count=100 if page == 1 else 50,
+                page=1,
+                count=200,
             )
         except SeedError:
-            rows = []
+            continue
+        for row in found or []:
+            if not isinstance(row, dict):
+                continue
+            marker = _torrent_marker(row)
+            if marker in seen_rows:
+                continue
+            seen_rows.add(marker)
+            rows.append(row)
+    # 解析不出同名媒体（或该媒体无资源）时回退纯关键词搜索。
     if not rows:
         rows = client.search_title(q, mtype=type, sites=sites, page=page)
     # 搜索为空时给出可行动的原因：MP 站点全离线（Cookie 失效/网络不通）是常见根因
@@ -1463,7 +1715,7 @@ def mp_torrents(
     type: Literal["movie", "tv", "music"] | None = None,
     season: int | None = None,
     page: int = Query(1, ge=1),
-    count: int = Query(50, ge=1, le=100),
+    count: int = Query(200, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

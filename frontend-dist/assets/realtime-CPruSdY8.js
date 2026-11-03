@@ -1,0 +1,1 @@
+import{dt as e}from"./index-CmV4yn4b.js";var t=e(`realtime`,()=>{let e=new Set;function t(t){return e.add(t),()=>{e.delete(t)}}function n(t){for(let n of[...e])n(t)}return{subscribe:t,emit:n}});export{t};

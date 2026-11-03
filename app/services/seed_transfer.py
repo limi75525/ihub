@@ -21,6 +21,7 @@ import time
 from app.db.session import SessionLocal
 from app.models.seed_connection import SeedConnection
 from app.services.seed_common import SeedError, mp_transfer_matches, normalize_remote_path
+from app.services import notify_service
 from app.services.seed_service import invalidate_qb_list, mp_client, qb_client
 
 logger = logging.getLogger(__name__)
@@ -29,9 +30,12 @@ PENDING_TAG = "转媒体"
 DONE_TAG = "已转媒体"
 MP_TAG = "MOVIEPILOT"
 
+# 环境变量只作为「默认值」；实际路径优先读系统设置（设置 → 种子 → 转媒体目录）
 TV_PATH = os.environ.get("IHUB_SEED_TRANSFER_TV_PATH", "/media/下载/电视")
 MOVIE_PATH = os.environ.get("IHUB_SEED_TRANSFER_MOVIE_PATH", "/media/下载/电影")
 TARGETS = {"tv": TV_PATH, "movie": MOVIE_PATH}
+
+SETTING_KEYS = {"tv": "seed_transfer_tv_path", "movie": "seed_transfer_movie_path"}
 
 POLL_SECONDS = 15
 HISTORY_TTL = 30.0
@@ -65,10 +69,54 @@ def _is_brush(tags: set[str]) -> bool:
 
 
 def target_path(target: str) -> str:
-    path = TARGETS.get(target)
-    if not path:
+    """转媒体目标目录：系统设置优先，未设置时用环境变量默认值。"""
+    if target not in TARGETS:
         raise SeedError("未知的转媒体目标", 400)
-    return path
+    from app.models.system_setting import get_setting
+
+    value = (get_setting(SETTING_KEYS[target]) or "").strip().rstrip("/")
+    return value or TARGETS[target]
+
+
+def current_paths() -> dict[str, str]:
+    return {target: target_path(target) for target in TARGETS}
+
+
+def dir_state_for_path(path: str) -> str:
+    """任意目录在 MoviePilot 视角下的状态；MP 未配置/不可用返回 unavailable。"""
+    db = SessionLocal()
+    try:
+        conn = _first_conn(db, "moviepilot")
+        if conn is None:
+            return "unavailable"
+        return mp_client(conn).dir_state(path)
+    except SeedError:
+        return "unavailable"
+    finally:
+        db.close()
+
+
+def target_dir_state(target: str) -> str:
+    return dir_state_for_path(target_path(target))
+
+
+def notify_transfer_failed(path: str, reason: str) -> None:
+    """转媒体前置校验失败：通知管理员（按 路径+天 去重，避免连点刷屏）。"""
+    db = SessionLocal()
+    try:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        notify_service.notify_admins(
+            db,
+            type="service_failed",
+            title="转媒体失败",
+            body=f"目标目录「{path}」{reason}，本次未执行转媒体（文件未移动、标签未改动）。",
+            link="#/seeds?tab=download",
+            dedup_key=f"transfer-fail:{path}:{day}"[:160],
+        )
+    except Exception:  # noqa: BLE001 通知失败不影响主流程
+        logger.warning("转媒体失败通知写入失败", exc_info=True)
+    finally:
+        db.close()
 
 
 def notify(hash_string: str) -> None:
@@ -236,7 +284,11 @@ def stop_worker() -> None:
 
 
 def convert(qb, torrent_hash: str, target: str) -> dict:
-    """执行 qB 侧转媒体动作；MP 整理由后台 worker 继续跟踪。"""
+    """执行 qB 侧转媒体动作；MP 整理由后台 worker 继续跟踪。
+
+    目标目录不存在时**不调用 qB**：libtorrent 的 move_storage 会自动
+    create_directories，等于替用户凭空建目录；这里先校验，缺失即失败并通知管理员。
+    """
     path = target_path(target)
     rows = qb.torrents(hashes=torrent_hash)
     if not rows:
@@ -253,6 +305,17 @@ def convert(qb, torrent_hash: str, target: str) -> dict:
         progress = 0
     if progress < 0.999:
         raise SeedError("种子尚未下载完成，不能转媒体", 400)
+
+    # 目标目录不存在时**不调用 qB**：libtorrent 的 move_storage 会自动 create_directories，
+    # 等于替用户凭空建目录；这里在改动任何标签之前先校验，缺失即失败并通知管理员。
+    state = target_dir_state(target)
+    if state in ("missing", "missing_parent"):
+        reason = "不存在" if state == "missing" else "的上级目录不可见"
+        notify_transfer_failed(path, reason)
+        raise SeedError(
+            f"目标目录「{path}」{reason}，已取消转媒体（不会自动创建目录）；请先在文件系统创建该目录",
+            400,
+        )
 
     old_tags = sorted(tags)
     old_category = str(row.get("category") or "")
