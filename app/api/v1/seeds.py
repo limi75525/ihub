@@ -1192,6 +1192,27 @@ def _prewarm_cover_urls(items: list[dict], *, limit: int = 24) -> None:
         seed_covers.prewarm(urls, limit=limit)
 
 
+def _prewarm_detail_arts(detail: dict, *, limit: int = 60) -> None:
+    """详情页头像预热：演员/主创头像只在点进详情后才首次出现，没有预热时
+    NAS（无出站代理）要直连被墙的 image.tmdb.org 逐张现拉，表现为头像加载
+    极慢甚至超时。详情响应返回时把 cast/credits 的头像一并塞进后台预热，
+    浏览器渲染到演员区时已命中本地磁盘缓存。"""
+    urls: list[str] = []
+    marker = "/api/v1/seeds/cover?url="
+    for section in ("cast", "credits"):
+        rows = detail.get(section)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = str(row.get("profile") or "")
+            if marker in value:
+                urls.append(unquote(value.split(marker, 1)[1]))
+    if urls:
+        seed_covers.prewarm(urls, limit=limit)
+
+
 def _site_status(client) -> dict:
     """搜索/资源为空时给前端的站点健康提示（total/ok/unavailable）。
 
@@ -1671,7 +1692,10 @@ def mp_media_detail_endpoint(
     # MP 电视剧首查会现拉 TMDB 的季/演职员（可达十几秒）；详情 24h 内直接复用
     # （前端还有会话级缓存，这里兜底跨会话/重启前的重复拉取）
     key = f"mp:media-detail:{media_source}:{media_id}:{zh_type}"
-    return {"detail": cached(conn.id, key, 86400.0, load)}
+    detail = cached(conn.id, key, 86400.0, load)
+    # 演员头像只在详情页出现且无列表预热覆盖，这里补预热（后台线程，不阻塞响应）
+    _prewarm_detail_arts(detail)
+    return {"detail": detail}
 
 
 @router.get("/mp/media")
