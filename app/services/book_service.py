@@ -421,6 +421,8 @@ def parse_fb2(path: Path) -> dict:
     except ET.ParseError:
         # 容错：个别文件命名空间前缀未声明（如 l:href），去掉 xmlns 声明后按无命名空间解析
         raw = path.read_text(encoding="utf-8", errors="replace")
+        # 防 Billion Laughs：剥掉 DOCTYPE（内部实体唯一合法来源），FB2 不使用 DTD
+        raw = re.sub(r"<!DOCTYPE[^>\[>]*(\[[^\]]*\])?[^>]*>", "", raw, flags=re.I | re.S)
         # 容错：未声明前缀的属性（如 l:href）——先去掉 xmlns 声明，再剥属性前缀
         raw = re.sub(r'\sxmlns(:\w+)?="[^"]*"', '', raw)
         raw = re.sub(r'\s(\w+):(\w+)=' , r' \2=', raw)
@@ -551,3 +553,21 @@ def parse_mobi(path: Path, fallback_title: str = "") -> dict:
         return result
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def purge_book(db, book) -> None:
+    """物理删除：书籍文件、封面、章节与进度一并清除（回收站关闭时与回收站清空共用）。"""
+    from app.models.book import BookChapter, BookProgress
+
+    from app.core import data_dirs
+
+    if book.file_path:
+        p = data_dirs.resolve_rel(book.file_path)
+        if p:
+            p.unlink(missing_ok=True)
+    cp = data_dirs.resolve_rel(book.cover_path)
+    if cp:
+        cp.unlink(missing_ok=True)
+    db.query(BookChapter).filter(BookChapter.book_id == book.id).delete(synchronize_session=False)
+    db.query(BookProgress).filter(BookProgress.book_id == book.id).delete(synchronize_session=False)
+    db.delete(book)

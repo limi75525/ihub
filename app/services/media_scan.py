@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from app.db.session import SessionLocal
-from app.models.system_setting import get_setting_db, set_setting
+from app.db.settings_repo import get_setting_db, set_setting
 
 logger = logging.getLogger(__name__)
 

@@ -17,6 +17,7 @@
 import html as _html_mod
 import ipaddress
 import re as _re
+import urllib.request
 
 from fastapi import Request
 
@@ -71,6 +72,65 @@ def host_resolves_private(host: str) -> str | None:
         if not ip.is_global or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             return str(ip)
     return None
+
+
+def assert_public_http_url(url: str, *, allow_private: bool = False) -> None:
+    """出站请求的 SSRF 校验（普通用户/管理员可填的任意 URL）：
+    仅允许 http(s)，域名解析出的所有 IP 都不得是私网/环回/链路本地/保留段
+    （169.254.169.254 云元数据、127.0.0.1、192.168.* 等一律拒绝）。
+
+    统一入口（原 logos / brand_icons 各自的同名函数收敛于此）；
+    seed_covers 走白名单域名的 _validate_url，不经本函数。
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("仅支持 http(s) 地址")
+    if allow_private:
+        return
+    private_ip = host_resolves_private(parts.hostname)
+    if private_ip:
+        raise ValueError(f"地址解析到内网/保留 IP（{private_ip}），已拒绝")
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urlopen 默认静默跟随重定向——跳转后的地址绕过请求前的内网校验。
+    重定向的每一跳都重新校验，不合规直接失败。"""
+
+    def __init__(self, *, allow_private: bool = False) -> None:
+        super().__init__()
+        self._allow_private = allow_private
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        assert_public_http_url(newurl, allow_private=self._allow_private)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def safe_fetch(
+    url: str,
+    *,
+    timeout: int = 15,
+    max_bytes: int,
+    user_agent: str = "iHub",
+    allow_private: bool = False,
+) -> tuple[str, str, bytes]:
+    """SSRF 安全的出站 GET：请求前校验、每跳重定向校验、最终地址复核、按上限读取。
+
+    返回 (最终 URL, Content-Type 主类型, 数据)。超过 max_bytes 抛 ValueError；
+    校验失败抛 ValueError；网络错误原样上抛（调用方按各自语义处理）。
+    """
+    assert_public_http_url(url, allow_private=allow_private)
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    opener = urllib.request.build_opener(SafeRedirectHandler(allow_private=allow_private))
+    with opener.open(req, timeout=timeout) as resp:
+        # 跟随重定向后的最终地址再核验一次（防 DNS/跳转组合绕过）
+        assert_public_http_url(resp.geturl(), allow_private=allow_private)
+        ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
+        data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError("响应超过大小上限")
+    return resp.geturl(), ctype, data
 
 
 def _parse_ip(raw: str) -> str:

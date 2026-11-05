@@ -19,6 +19,7 @@ import threading
 import time
 
 from app.db.session import SessionLocal
+from app.core.ttlcache import LockedTTLCache
 from app.models.seed_connection import SeedConnection
 from app.services.seed_common import SeedError, mp_transfer_matches, normalize_remote_path
 from app.services import notify_service
@@ -45,10 +46,13 @@ HISTORY_COUNT = 200
 _STOP = threading.Event()
 _WAKE = threading.Event()
 _THREAD: threading.Thread | None = None
+# start_worker 是 check-then-start：并发保存连接可能同时通过检查、各起一个轮询线程，
+# 与 seed_traffic / seed_events 的启动锁同一模式
+_WORKER_LOCK = threading.Lock()
 _PENDING: set[str] = set()
 _PENDING_LOCK = threading.Lock()
-_HISTORY_CACHE: dict[int, tuple[float, list[dict]]] = {}
-_HISTORY_LOCK = threading.Lock()
+# MP 整理历史短缓存（30s）；LockedTTLCache 自带锁与按 key 记时
+_HISTORY_CACHE = LockedTTLCache(ttl=HISTORY_TTL)
 
 
 def _first_conn(db, kind: str) -> SeedConnection | None:
@@ -72,14 +76,10 @@ def target_path(target: str) -> str:
     """转媒体目标目录：系统设置优先，未设置时用环境变量默认值。"""
     if target not in TARGETS:
         raise SeedError("未知的转媒体目标", 400)
-    from app.models.system_setting import get_setting
+    from app.db.settings_repo import get_setting
 
     value = (get_setting(SETTING_KEYS[target]) or "").strip().rstrip("/")
     return value or TARGETS[target]
-
-
-def current_paths() -> dict[str, str]:
-    return {target: target_path(target) for target in TARGETS}
 
 
 def dir_state_for_path(path: str) -> str:
@@ -161,11 +161,9 @@ def _history_rows(conn: SeedConnection) -> list[dict]:
     download_hash 可能为空（刷流种子没有 MP 下载记录时真实发生过），
     因此同时保留 src 路径供 mp_transfer_matches 回退匹配。
     """
-    now = time.time()
-    with _HISTORY_LOCK:
-        cached = _HISTORY_CACHE.get(conn.id)
-        if cached and now - cached[0] < HISTORY_TTL:
-            return cached[1]
+    ok, cached = _HISTORY_CACHE.get(conn.id)
+    if ok:
+        return cached
     history: list[dict] = []
     try:
         client = mp_client(conn)
@@ -188,8 +186,7 @@ def _history_rows(conn: SeedConnection) -> list[dict]:
     except Exception as e:  # noqa: BLE001
         logger.warning("读取 MP 整理历史失败：%s", e)
         return []
-    with _HISTORY_LOCK:
-        _HISTORY_CACHE[conn.id] = (now, history)
+    _HISTORY_CACHE.put(conn.id, history)
     return history
 
 
@@ -269,11 +266,12 @@ def _loop() -> None:
 
 def start_worker() -> None:
     global _THREAD
-    if _THREAD and _THREAD.is_alive():
-        return
-    _STOP.clear()
-    _THREAD = threading.Thread(target=_loop, name="ihub-seed-transfer", daemon=True)
-    _THREAD.start()
+    with _WORKER_LOCK:
+        if _THREAD and _THREAD.is_alive():
+            return
+        _STOP.clear()
+        _THREAD = threading.Thread(target=_loop, name="ihub-seed-transfer", daemon=True)
+        _THREAD.start()
 
 
 def stop_worker() -> None:

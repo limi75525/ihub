@@ -289,8 +289,13 @@ def get_cover(raw: str) -> tuple[Path, str]:
                 FAILS[key] = (time.time() + FAIL_TTL, e.message)
                 if len(FAILS) > 2000:
                     limit = time.time()
-                    for stale_key in [k for k, v in FAILS.items() if v[0] < limit][:1000]:
+                    stale_keys = [k for k, v in FAILS.items() if v[0] < limit][:1000]
+                    for stale_key in stale_keys:
                         FAILS.pop(stale_key, None)
+                    # 锁表联动淘汰：封面 URL 哈希无界，锁 dict 只增不减会长期累积
+                    with _LOCKS_GUARD:
+                        for stale_key in stale_keys:
+                            _LOCKS.pop(stale_key, None)
             if cached is not None:
                 return cached, _TYPE_BY_EXT.get(cached.suffix.lower(), "image/jpeg")
             raise

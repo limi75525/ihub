@@ -10,8 +10,9 @@ from urllib.error import HTTPError as UrlHTTPError
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+
+from app.core.errors import UpstreamError
 
 HTTP_TIMEOUT = 8
 
@@ -58,10 +59,9 @@ def http(
             detail = e.read()[:200].decode("utf-8", "replace")
         except Exception:
             detail = ""
-        raise HTTPException(502, f"上游返回 {e.code}：{detail}") from None
+        raise UpstreamError(f"上游返回 {e.code}：{detail}", 502) from None
     except (URLError, TimeoutError, OSError) as e:
-        raise HTTPException(502, conn_message(e)) from None
-
+        raise UpstreamError(conn_message(e), 502) from None
 
 def http_open(url: str, headers: dict | None = None, timeout: int = 30):
     """打开上游连接返回原始响应（流式转发用）；非 2xx 统一 502。"""
@@ -73,10 +73,9 @@ def http_open(url: str, headers: dict | None = None, timeout: int = 30):
             detail = e.read()[:200].decode("utf-8", "replace")
         except Exception:
             detail = ""
-        raise HTTPException(502, f"上游返回 {e.code}：{detail}") from None
+        raise UpstreamError(f"上游返回 {e.code}：{detail}", 502) from None
     except (URLError, TimeoutError, OSError) as e:
-        raise HTTPException(502, conn_message(e)) from None
-
+        raise UpstreamError(conn_message(e), 502) from None
 
 def http_passthrough_401(
     url: str,
@@ -105,10 +104,9 @@ def http_passthrough_401(
             detail = e.read()[:200].decode("utf-8", "replace")
         except Exception:
             detail = ""
-        raise HTTPException(502, f"上游返回 {e.code}：{detail}") from None
+        raise UpstreamError(f"上游返回 {e.code}：{detail}", 502) from None
     except (URLError, TimeoutError, OSError) as e:
-        raise HTTPException(502, conn_message(e)) from None
-
+        raise UpstreamError(conn_message(e), 502) from None
 
 def open_stream_raw(full_url: str, headers: dict) -> object:
     """流式转发专用打开：UrlHTTPError 原样抛给调用方（401 重认证要区分状态码），
@@ -119,8 +117,7 @@ def open_stream_raw(full_url: str, headers: dict) -> object:
     except UrlHTTPError:
         raise
     except (URLError, TimeoutError, OSError) as e:
-        raise HTTPException(502, conn_message(e)) from None
-
+        raise UpstreamError(conn_message(e), 502) from None
 
 def proxy_stream(upstream, fallback_type: str = "audio/mpeg"):
     """把上游音频/视频响应包装成分块 StreamingResponse，透传 Range/Content-Range，
@@ -132,7 +129,7 @@ def proxy_stream(upstream, fallback_type: str = "audio/mpeg"):
             upstream.close()
         except Exception:
             pass
-        raise HTTPException(502, f"上游返回异常状态 {upstream.status}")
+        raise UpstreamError(f"上游返回异常状态 {upstream.status}", 502)
     headers: dict[str, str] = {}
     status = 200
     content_range = upstream.headers.get("Content-Range")

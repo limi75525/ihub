@@ -10,10 +10,12 @@ import time
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from fastapi import HTTPException
+
 from app.core.crypto import decrypt_text
+from app.core.ttlcache import LockedTTLCache
 from app.models.seed_connection import SeedConnection
 from app.models.user import User
 from app.services import tmdb
@@ -25,12 +27,15 @@ from app.services.seed_common import (
     mp_transfer_matches,
     normalize_remote_path,
 )
+from app.core.errors import UpstreamError
 
 ALL_TABS = ["download", "subscription", "search", "discover", "sites", "brush"]
 
 logger = logging.getLogger(__name__)
 
-# 缓存：单 worker + 短 TTL；只缓存成功结果，错误让前端看到真实状态
+# 缓存：单 worker + 短 TTL；只缓存成功结果，错误让前端看到真实状态。
+# 缓存统一走 core.ttlcache.LockedTTLCache；本文件的 _CACHE 主缓存与
+# cached()/cache_set() 的单飞锁、满员淘汰强耦合，实现保留原状，外部行为不变。
 _CACHE: dict[tuple[int, str], tuple[float, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 _CLIENTS: dict[int, tuple[str, Any]] = {}
@@ -41,18 +46,15 @@ _CLIENTS_LOCK = threading.Lock()
 _DOWNLOAD_META_TTL = 24 * 3600
 _DOWNLOAD_META_PAGES = 3
 _DOWNLOAD_META_COUNT = 200
-_DOWNLOAD_META: dict[int, tuple[float, dict[str, dict]]] = {}
-_DOWNLOAD_META_LOCK = threading.Lock()
+_DOWNLOAD_META = LockedTTLCache()
 # MP 整理历史里的封面：刷流种子没有下载历史，转媒体成功后从这里补封面（同样 24h）。
 _TRANSFER_META_TTL = 24 * 3600
 _TRANSFER_META_PAGES = 2
 _TRANSFER_META_COUNT = 200
-_TRANSFER_META: dict[int, tuple[float, list[dict]]] = {}
-_TRANSFER_META_LOCK = threading.Lock()
+_TRANSFER_META = LockedTTLCache()
 # 详情抽屉的媒体元数据（标题/封面/宽幅背景），按种子 hash 缓存；静态信息，长缓存。
 _DETAIL_MEDIA_TTL = 24 * 3600
-_DETAIL_MEDIA: dict[tuple[int, str], tuple[float, dict]] = {}
-_DETAIL_MEDIA_LOCK = threading.Lock()
+_DETAIL_MEDIA = LockedTTLCache()
 _HISTORY_SCAN_PAGES = 5
 _HISTORY_SCAN_COUNT = 200
 _TRANSFER_TAGS = {"转媒体", "已转媒体", "已整理"}
@@ -76,7 +78,7 @@ def _secret(conn: SeedConnection) -> str:
         return ""
     value = decrypt_text(conn.secret_cipher)
     if value is None:
-        raise HTTPException(500, "连接密钥无法解密，请重新保存该连接")
+        raise UpstreamError("连接密钥无法解密，请重新保存该连接", 500)
     return value
 
 
@@ -126,6 +128,108 @@ def mp_client(conn: SeedConnection, *, fresh: bool = False) -> MpClient:
         return client
 
 
+def _fetch_history_summaries(
+    log_text: str,
+    fail_text: str,
+    pages: int,
+    fetch_page,
+    row_to_summary,
+) -> list | None:
+    """下载历史/整理历史抓取的同构骨架（原 attach_download_media 两段重复逻辑）。
+
+    fetch_page(page) -> 历史行列表（由调用方闭包 client 与 count）；
+    row_to_summary(row) -> 三种返回：
+      None            该行不可用，不占用去重键；
+      (marker, None)  该行占用去重键 marker（(hash, src) 二元组）但不产出条目；
+      (marker, entry) 占用去重键并产出条目。
+    marker 去重键两者皆空跳过、重复只保留首次出现——与原两段语义一致：
+    下载历史空 hash 即跳过且空摘要行不占 hash；整理历史 (hash, src) 空摘要行
+    同样占据 marker（现状即如此，勿统一）。
+
+    返回 entry 列表；任何异常返回 None，由调用方回退旧缓存（封面是增强信息，
+    不能拖垮 qB 列表——原语义）。"""
+    seen: set[tuple[str, str]] = set()
+    entries: list = []
+    try:
+        logger.info(log_text, pages)
+        for page in range(1, pages + 1):
+            rows = fetch_page(page)
+            if not rows:
+                break
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                parsed = row_to_summary(row)
+                if parsed is None:
+                    continue
+                marker, entry = parsed
+                if not marker[0] and not marker[1]:
+                    continue
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                if entry is not None:
+                    entries.append(entry)
+    except Exception as e:  # noqa: BLE001 - 封面是增强信息，不能拖垮 qB 列表
+        logger.debug(fail_text, e)
+        return None
+    return entries
+
+
+def _download_row_summary(row: dict):
+    """下载历史行 -> ((hash, ""), (hash, 媒体摘要))；不可用返回 None。"""
+    digest = str(row.get("download_hash") or "").lower()
+    if not digest:
+        return None
+    poster = str(row.get("poster") or "").strip()
+    if not poster.startswith(("http://", "https://")):
+        poster = ""
+    summary = {
+        "media_title": str(row.get("title") or "").strip(),
+        "media_year": str(row.get("year") or "").strip(),
+        "media_site": str(row.get("torrent_site") or "").strip(),
+        "media_poster": poster,
+    }
+    proxied = proxy_url(poster) if poster else None
+    if proxied:
+        summary["media_poster"] = proxied
+        summary["media_poster_fallback"] = poster
+    if not any(summary.values()):
+        return None
+    return (digest, ""), (digest, summary)
+
+
+def _transfer_row_entry(row: dict):
+    """整理历史行 -> ((hash, src), {download_hash, src, summary})；不可用返回 None。"""
+    if not bool(row.get("status")):
+        return None
+    src_item = row.get("src_fileitem")
+    digest = str(row.get("download_hash") or "").strip().lower()
+    src = normalize_remote_path(
+        row.get("src")
+        or (src_item.get("path") if isinstance(src_item, dict) else "")
+    )
+    if not digest and not src:
+        return None
+    poster = str(row.get("image") or "").strip()
+    if not poster.startswith(("http://", "https://")):
+        poster = ""
+    summary = {
+        "media_title": str(row.get("title") or "").strip(),
+        "media_year": str(row.get("year") or "").strip(),
+        "media_poster": poster,
+    }
+    proxied = proxy_url(poster) if poster else None
+    if proxied:
+        summary["media_poster"] = proxied
+        summary["media_poster_fallback"] = poster
+    marker = (digest, src)
+    if not any(summary.values()):
+        # 与现状一致：空摘要行仍占据 (hash, src) 去重键（只产出条目时才 append）
+        return marker, None
+    return marker, {"download_hash": digest, "src": src, "summary": summary}
+
+
 def attach_download_media(conn: SeedConnection, items: list[dict], *, refresh: bool = False) -> None:
     """给 qB 任务补 MP 下载历史里的媒体摘要（海报/媒体名/年份/站点）。
 
@@ -143,8 +247,8 @@ def attach_download_media(conn: SeedConnection, items: list[dict], *, refresh: b
     if not hashes:
         return
     now = time.time()
-    with _DOWNLOAD_META_LOCK:
-        cached = _DOWNLOAD_META.get(conn.id)
+    # peek 而非 TTL get：拉新失败时要回退上一份（可能已过期的）数据——原语义
+    cached = _DOWNLOAD_META.peek(conn.id)
     if not refresh and cached is not None and now - cached[0] < _DOWNLOAD_META_TTL:
         mapping = cached[1]
     else:
@@ -152,40 +256,19 @@ def attach_download_media(conn: SeedConnection, items: list[dict], *, refresh: b
         mapping = None
 
     if mapping is None:
-        fresh: dict[str, dict] = {}
-        try:
-            logger.info("种子下载页：拉取 MP 下载历史（%s 页）补全封面", _DOWNLOAD_META_PAGES)
-            client = mp_client(conn)
-            for page in range(1, _DOWNLOAD_META_PAGES + 1):
-                rows = client.download_history(page=page, count=_DOWNLOAD_META_COUNT)
-                if not rows:
-                    break
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    digest = str(row.get("download_hash") or "").lower()
-                    if not digest or digest in fresh:
-                        continue
-                    poster = str(row.get("poster") or "").strip()
-                    if not poster.startswith(("http://", "https://")):
-                        poster = ""
-                    summary = {
-                        "media_title": str(row.get("title") or "").strip(),
-                        "media_year": str(row.get("year") or "").strip(),
-                        "media_site": str(row.get("torrent_site") or "").strip(),
-                        "media_poster": poster,
-                    }
-                    proxied = proxy_url(poster) if poster else None
-                    if proxied:
-                        summary["media_poster"] = proxied
-                        summary["media_poster_fallback"] = poster
-                    if any(summary.values()):
-                        fresh[digest] = summary
-        except Exception as e:  # noqa: BLE001 - 封面是增强信息，不能拖垮 qB 列表
-            logger.debug("读取 MoviePilot 下载历史失败：%s", e)
-            fresh = previous
-        with _DOWNLOAD_META_LOCK:
-            _DOWNLOAD_META[conn.id] = (now, fresh)
+        client = mp_client(conn)
+        fetched = _fetch_history_summaries(
+            "种子下载页：拉取 MP 下载历史（%s 页）补全封面",
+            "读取 MoviePilot 下载历史失败：%s",
+            _DOWNLOAD_META_PAGES,
+            lambda page: client.download_history(page=page, count=_DOWNLOAD_META_COUNT),
+            _download_row_summary,
+        )
+        if fetched is None:
+            fresh: dict[str, dict] = previous
+        else:
+            fresh = dict(fetched)
+        _DOWNLOAD_META.put(conn.id, fresh, at=now)
         mapping = fresh
 
     for item in items:
@@ -206,60 +289,23 @@ def attach_download_media(conn: SeedConnection, items: list[dict], *, refresh: b
     if not transfer_items:
         return
     now = time.time()
-    with _TRANSFER_META_LOCK:
-        cached = _TRANSFER_META.get(conn.id)
+    cached = _TRANSFER_META.peek(conn.id)
     if not refresh and cached is not None and now - cached[0] < _TRANSFER_META_TTL:
         transfer_entries = cached[1]
     else:
         transfer_entries = None
     if transfer_entries is None:
-        previous = cached[1] if cached else []
-        fresh_entries: list[dict] = []
-        seen: set[tuple[str, str]] = set()
-        try:
-            logger.info("种子下载页：拉取 MP 整理历史（%s 页）补全转媒体封面", _TRANSFER_META_PAGES)
-            client = mp_client(conn)
-            for page in range(1, _TRANSFER_META_PAGES + 1):
-                rows = client.transfer_history(page=page, count=_TRANSFER_META_COUNT)
-                if not rows:
-                    break
-                for row in rows:
-                    if not isinstance(row, dict) or not bool(row.get("status")):
-                        continue
-                    src_item = row.get("src_fileitem")
-                    digest = str(row.get("download_hash") or "").strip().lower()
-                    src = normalize_remote_path(
-                        row.get("src")
-                        or (src_item.get("path") if isinstance(src_item, dict) else "")
-                    )
-                    marker = (digest, src)
-                    if (not digest and not src) or marker in seen:
-                        continue
-                    seen.add(marker)
-                    poster = str(row.get("image") or "").strip()
-                    if not poster.startswith(("http://", "https://")):
-                        poster = ""
-                    summary = {
-                        "media_title": str(row.get("title") or "").strip(),
-                        "media_year": str(row.get("year") or "").strip(),
-                        "media_poster": poster,
-                    }
-                    proxied = proxy_url(poster) if poster else None
-                    if proxied:
-                        summary["media_poster"] = proxied
-                        summary["media_poster_fallback"] = poster
-                    if any(summary.values()):
-                        fresh_entries.append({
-                            "download_hash": digest,
-                            "src": src,
-                            "summary": summary,
-                        })
-        except Exception as e:  # noqa: BLE001 - 封面是增强信息，不能拖垮 qB 列表
-            logger.debug("读取 MoviePilot 整理历史失败：%s", e)
-            fresh_entries = previous
-        with _TRANSFER_META_LOCK:
-            _TRANSFER_META[conn.id] = (now, fresh_entries)
-        transfer_entries = fresh_entries
+        previous_entries = cached[1] if cached else []
+        client = mp_client(conn)
+        fetched = _fetch_history_summaries(
+            "种子下载页：拉取 MP 整理历史（%s 页）补全转媒体封面",
+            "读取 MoviePilot 整理历史失败：%s",
+            _TRANSFER_META_PAGES,
+            lambda page: client.transfer_history(page=page, count=_TRANSFER_META_COUNT),
+            _transfer_row_entry,
+        )
+        transfer_entries = previous_entries if fetched is None else fetched
+        _TRANSFER_META.put(conn.id, transfer_entries, at=now)
     for item in transfer_items:
         for entry in transfer_entries:
             if mp_transfer_matches(
@@ -282,9 +328,7 @@ def invalidate_qb_list(conn_id: int) -> None:
             if k[0] == conn_id and (k[1].startswith("qb:list:") or k[1] == "qb:tags")
         ]:
             _CACHE.pop(key, None)
-    with _DETAIL_MEDIA_LOCK:
-        for key in [k for k in _DETAIL_MEDIA if k[0] == conn_id]:
-            _DETAIL_MEDIA.pop(key, None)
+    _DETAIL_MEDIA.invalidate_where(lambda k: k[0] == conn_id)
 
 
 def invalidate_connection(conn_id: int) -> None:
@@ -293,26 +337,9 @@ def invalidate_connection(conn_id: int) -> None:
     with _CACHE_LOCK:
         for key in [k for k in _CACHE if k[0] == conn_id]:
             _CACHE.pop(key, None)
-    with _DOWNLOAD_META_LOCK:
-        _DOWNLOAD_META.pop(conn_id, None)
-    with _TRANSFER_META_LOCK:
-        _TRANSFER_META.pop(conn_id, None)
-    with _DETAIL_MEDIA_LOCK:
-        for key in [k for k in _DETAIL_MEDIA if k[0] == conn_id]:
-            _DETAIL_MEDIA.pop(key, None)
-
-
-def clear_all_cache() -> None:
-    with _CLIENTS_LOCK:
-        _CLIENTS.clear()
-    with _CACHE_LOCK:
-        _CACHE.clear()
-    with _DOWNLOAD_META_LOCK:
-        _DOWNLOAD_META.clear()
-    with _TRANSFER_META_LOCK:
-        _TRANSFER_META.clear()
-    with _DETAIL_MEDIA_LOCK:
-        _DETAIL_MEDIA.clear()
+    _DOWNLOAD_META.invalidate(conn_id)
+    _TRANSFER_META.invalidate(conn_id)
+    _DETAIL_MEDIA.invalidate_where(lambda k: k[0] == conn_id)
 
 
 # media-detail 这类按媒体 id 展开的 key 无界，满员时按写入时间淘汰最旧的四分之一
@@ -357,14 +384,20 @@ def cached(conn_id: int, key: str, ttl: float, loader, *, force: bool = False) -
                 oldest = sorted(_CACHE.items(), key=lambda kv: kv[1][0])[: _CACHE_MAX_ENTRIES // 4]
                 for stale_key, _ in oldest:
                     _CACHE.pop(stale_key, None)
+                    # 锁表与缓存同步淘汰：否则按媒体 id 展开的 key 会让锁 dict 无界增长
+                    with _CACHE_LOCKS_GUARD:
+                        _CACHE_LOCKS.pop(stale_key, None)
             _CACHE[cache_key] = (time.time(), value)
         return value
 
 
 def cache_drop(conn_id: int, key: str) -> None:
     """主动失效一条连接级缓存：写操作成功后调用，让下一次读取重查上游。"""
+    cache_key = (conn_id, key)
     with _CACHE_LOCK:
-        _CACHE.pop((conn_id, key), None)
+        _CACHE.pop(cache_key, None)
+    with _CACHE_LOCKS_GUARD:
+        _CACHE_LOCKS.pop(cache_key, None)
 
 
 def cache_set(conn_id: int, key: str, value: Any, *, at: float | None = None) -> None:
@@ -390,7 +423,7 @@ def require_tab(user: User, db: Session, tab: str) -> None:
     if user.role == "admin":
         return
     if tab not in allowed_tabs(user, db):
-        raise HTTPException(403, "当前账号没有查看该种子栏目的权限")
+        raise UpstreamError("当前账号没有查看该种子栏目的权限", 403)
 
 
 def connection_out(conn: SeedConnection, *, admin: bool = False) -> dict:
@@ -1252,17 +1285,15 @@ def torrent_media_detail(
     name = str(item.get("name") or "")
     key = (conn.id, digest or f"{save_path}|{name}")
     now = time.time()
-    with _DETAIL_MEDIA_LOCK:
-        cached_value = _DETAIL_MEDIA.get(key)
-        if cached_value and now - cached_value[0] < _DETAIL_MEDIA_TTL:
-            return cached_value[1]
+    ok, cached_value = _DETAIL_MEDIA.get(key)
+    if ok:
+        return cached_value
     result: dict = {}
     try:
         client = mp_client(conn)
         row = _find_mp_media_row(client, digest, save_path, name)
         if not row:
-            with _DETAIL_MEDIA_LOCK:
-                _DETAIL_MEDIA[key] = (now, result)
+            _DETAIL_MEDIA.put(key, result, at=now)
             return result
         media_id = str(row.get("media_id") or "").strip()
         media_source = str(row.get("media_source") or "").strip()
@@ -1325,10 +1356,183 @@ def torrent_media_detail(
     except Exception as e:  # noqa: BLE001 - 详情增强失败不能拖垮 qB 详情
         logger.debug("读取种子媒体详情失败：%s", e)
         result = {}
-    with _DETAIL_MEDIA_LOCK:
-        _DETAIL_MEDIA[key] = (now, result)
+    _DETAIL_MEDIA.put(key, result, at=now)
     return result
 
 
-def json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+# ---------------- 媒体解析（资源搜索的第一步，从 api/v1/seeds.py 平移） ----------------
+
+_MEDIA_TYPE_CN = {"movie": "电影", "tv": "电视剧", "music": "音乐"}
+_ALL_MEDIA_API_TYPES = ("media", "music", "collection", "person")
+_SEASON_SUFFIX_RE = re.compile(
+    r"\s*(?:第[一二三四五六七八九十0-9]+季|Season\s*\d+|S\d{1,2})\s*$", re.I
+)
+
+
+def _seasonless_title(value: str) -> str:
+    """去掉标题末尾的季标记（第N季 / Season N / Sxx），用于跨语言、跨季匹配。"""
+    text = str(value or "").strip()
+    while True:
+        stripped = _SEASON_SUFFIX_RE.sub("", text).strip()
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def _title_key(value: str) -> str:
+    """标题比对键：去空白与常见分隔符、忽略大小写。"""
+    return re.sub(r"[\s·・\-_:：,，.。'’\"“”]+", "", str(value or "")).lower()
+
+
+def _seasonless_key(value: str) -> str:
+    """去掉「第N季 / Season N / Sxx」后再比对；只用于详情兜底，避免季条目抢在主媒体前面。"""
+    return _title_key(_seasonless_title(value))
+
+
+def _media_title_values(media: dict) -> list[str]:
+    values = [
+        media.get("title"),
+        media.get("en_title"),
+        media.get("hk_title"),
+        media.get("tw_title"),
+        media.get("sg_title"),
+        media.get("original_title"),
+        media.get("original_name"),
+    ]
+    names = media.get("names")
+    if isinstance(names, list):
+        values.extend(names)
+    return [str(v) for v in values if v]
+
+
+def _media_ready(media: dict) -> bool:
+    return (
+        isinstance(media, dict)
+        and bool(media.get("media_id") or media.get("tmdb_id"))
+        and bool(media.get("media_source"))
+    )
+
+
+def _media_matches(media: dict, key: str, type_cn: str | None, *, seasonless: bool = False) -> bool:
+    if not _media_ready(media):
+        return False
+    if type_cn and str(media.get("type") or "") != type_cn:
+        return False
+    normalize = _seasonless_key if seasonless else _title_key
+    return any(normalize(v) == key for v in _media_title_values(media))
+
+
+def _media_confident(media: dict) -> bool:
+    """详情兜底只查高置信候选，避免把 HDR/FRDS 这类关键词误判成媒体。"""
+    try:
+        popularity = float(media.get("popularity") or 0)
+    except (TypeError, ValueError):
+        popularity = 0.0
+    try:
+        votes = int(media.get("vote_count") or 0)
+    except (TypeError, ValueError):
+        votes = 0
+    return popularity >= 1.0 or votes >= 10
+
+
+def _resolve_medias(
+    client, keyword: str, type_cn: str | None, api_types: tuple[str, ...]
+) -> list[dict]:
+    """关键词 → 同名媒体列表（MP 资源搜索的第一步）。
+
+    站点资源往往只索引英文名/别名（如爱情公寓 → Ipartment、黑帮领地 → MobLand），
+    纯中文关键词走 /search/title 搜不到。MP 搜索页的做法是先解析媒体、再按媒体 ID
+    搜站点。这里只认同名（宁缺毋滥）：搜发行组、分辨率等非媒体关键词解析不出来，
+    回退纯关键词搜索。
+
+    中文名可能只存在于媒体详情的 title/names 里（TMDB 主标题是英文时，
+    如黑帮领地 → MobLand），所以搜索摘要没有同名时会再查前几个高置信候选的详情。
+    """
+    key = _title_key(keyword)
+    if not key:
+        return []
+    candidates: list[dict] = []
+    for api_type in api_types:
+        try:
+            found = client.media_search(keyword, count=50, api_type=api_type)
+        except (SeedError, HTTPException):
+            continue
+        for media in found or []:
+            if not _media_ready(media):
+                continue
+            if type_cn and str(media.get("type") or "") != type_cn:
+                continue
+            candidates.append(media)
+    if not candidates:
+        return []
+
+    matched: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(media: dict) -> None:
+        ident = (
+            str(media.get("media_source") or ""),
+            str(media.get("media_id") or media.get("tmdb_id") or ""),
+            str(media.get("type") or ""),
+        )
+        if not ident[1] or ident in seen:
+            return
+        seen.add(ident)
+        matched.append(media)
+
+    # 1) 搜索摘要自带标题（快）；「全部类型」会保留电影/剧集/音乐等同名结果。
+    for media in candidates:
+        if _media_matches(media, key, type_cn):
+            add(media)
+
+    # 2) 摘要没有同名时，先按媒体 ID 搜 1 条探 media_info（通常 1~3 秒，已带中文标题）；
+    #    站点没有任何结果时才退回详情（电视剧首查可能十几秒）。
+    if not matched:
+        probed = 0
+        seasonless = _seasonless_key(keyword)
+        for media in candidates:
+            if probed >= 2:
+                break
+            if not _media_confident(media):
+                continue
+            probed += 1
+            mid = str(media.get("media_id") or media.get("tmdb_id") or "")
+            source = str(media.get("media_source") or "")
+            kind = str(media.get("type") or "")
+            try:
+                probe = client.search_torrents(mid, source, mtype=kind, count=1)
+            except SeedError:
+                probe = []
+            info = probe[0].get("media_info") if probe and isinstance(probe[0], dict) else None
+            if isinstance(info, dict) and info:
+                merged = {**media, **info}
+                merged["media_source"] = info.get("media_source") or source
+                merged["media_id"] = info.get("media_id") or mid
+                if _media_matches(merged, seasonless, type_cn, seasonless=True):
+                    add(merged)
+                # media_info 已经是该 ID 的权威标题；不同名说明候选不对，不再拉慢详情
+                continue
+            try:
+                detail = client.media_detail(mid, source, kind, timeout=20)
+            except (SeedError, HTTPException):
+                continue
+            if not isinstance(detail, dict):
+                continue
+            merged = {**media, **detail}
+            merged["media_source"] = detail.get("media_source") or media.get("media_source")
+            merged["media_id"] = (
+                detail.get("media_id") or media.get("media_id") or detail.get("tmdb_id")
+            )
+            if _media_matches(merged, seasonless, type_cn, seasonless=True):
+                add(merged)
+
+    # 指定类型只查最匹配的一部；「全部」每种类型只查最匹配的一部
+    # （同一部剧的 TMDB/豆瓣重复条目会并发/串行打站点，全部查会把搜索拖到一分钟）。
+    if type_cn:
+        return matched[:1]
+    per_type: dict[str, dict] = {}
+    for media in matched:
+        kind = str(media.get("type") or "")
+        if kind not in per_type:
+            per_type[kind] = media
+    return list(per_type.values())[:4]

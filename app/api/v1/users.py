@@ -18,7 +18,7 @@ router = APIRouter(tags=["users"], prefix="/users")
 
 
 def _user_out(user: User) -> UserOut:
-    from app.api.v1.auth import avatar_url_for
+    from app.services.uploads import avatar_url_for
 
     out = UserOut.model_validate(user)
     out.avatar_url = avatar_url_for(user)
@@ -141,7 +141,7 @@ async def upload_user_avatar(
     db: Session = Depends(get_db),
 ):
     """管理员为指定用户设置头像（与本人上传共用同一套校验与落盘逻辑）。"""
-    from app.api.v1.auth import apply_avatar_upload
+    from app.services.uploads import apply_avatar_upload
 
     target = db.get(User, user_id)
     if not target or target.is_deleted:
@@ -165,6 +165,6 @@ def get_avatar(user_id: int, user: User = Depends(get_media_user), db: Session =
     path = data_dirs.resolve_rel(target.avatar_path)
     if not path or not path.is_file():
         raise HTTPException(404, "无头像")
-    from app.api.v1.auth import media_file_headers
+    from app.services.uploads import media_file_headers
 
     return FileResponse(path, headers=media_file_headers(path))

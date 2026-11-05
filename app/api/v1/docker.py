@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_admin
 from app.db.session import get_db
-from app.models.system_setting import get_setting_db
+from app.db.settings_repo import get_setting_db
 from app.models.user import User
 from app.services import docker_service as docker
 

@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
@@ -54,10 +53,6 @@ _FAIL_RE = re.compile(r"登录或访问失败\s*[:：]\s*(\d+)")
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _sha(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def _human_size(value: int) -> str:
@@ -221,7 +216,9 @@ def _signin_failure_count(text: str) -> int:
 def _poll_mp(db: Session, conn: SeedConnection) -> None:
     client = mp_client(conn)
     notifications = []
-    for page in (1, 2):
+    # 翻页直到整页都已是旧通知（追上水位）或达到安全上限：
+    # 只拉两页的话，刷流高频通知/停机恢复会把第 3 页起的旧通知永久越过去（漏报）
+    for page in range(1, 11):
         batch = client.notifications(page=page, count=50)
         if not batch:
             break

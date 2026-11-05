@@ -5,6 +5,8 @@ import threading
 import time as _time
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
@@ -12,11 +14,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.v1.auth import registration_open
-from app.api.v1.recycle import recycle_enabled
+from app.services.recycle_service import recycle_enabled
 from app.core.config import settings as cfg
 from app.core.deps import get_current_admin
 from app.db.session import get_db
-from app.models.system_setting import get_int_setting, get_setting, get_setting_db, set_setting
+from app.db.settings_repo import get_int_setting, get_setting, get_setting_db, set_setting
 from app.models.user import User
 from app.services.logo_urls import file_url
 from app.services.retention import get_pending_at, get_retention_days, run_retention_cleanup
@@ -300,7 +302,7 @@ class LimitsIn(BaseModel):
 
 @router.get("/limits")
 def get_limits(admin: User = Depends(get_current_admin)):
-    from app.models.system_setting import get_int_setting
+    from app.db.settings_repo import get_int_setting
 
     return {
         "avatar_max_mb": get_int_setting("avatar_max_mb", 2, 1, 20),
@@ -499,5 +501,7 @@ def storage_cleanup(admin: User = Depends(get_current_admin)):
 
     if janitor.JANITOR_LOCK.locked():
         return {"ok": False, "error": "清理正在进行中"}
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     threading.Thread(target=janitor.run_janitor, daemon=True).start()
-    return {"ok": True, "started": True}
+    # started_at 供前端轮询 last_run.ts 是否已越过本轮触发时刻
+    return {"ok": True, "started": True, "started_at": started_at}

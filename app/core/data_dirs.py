@@ -118,7 +118,7 @@ def migrate_layout() -> None:
     from sqlalchemy import text
 
     from app.db.session import SessionLocal
-    from app.models.system_setting import get_setting_db
+    from app.db.settings_repo import get_setting_db
 
     try:
         db = SessionLocal()
@@ -256,7 +256,7 @@ def migrate_layout() -> None:
 def migrate_network_proxy() -> None:
     """影视旧 TMDB 代理字段 → 全局出站代理（一次性；旧键保留但代码不再读取）。"""
     from app.db.session import SessionLocal
-    from app.models.system_setting import get_setting_db, set_setting
+    from app.db.settings_repo import get_setting_db, set_setting
 
     db = SessionLocal()
     try:

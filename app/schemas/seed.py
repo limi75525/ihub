@@ -4,10 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-SEED_KINDS = ("qbittorrent", "moviepilot")
-SEED_VISIBILITY = ("all", "standard", "download_subscribe", "admin_only")
-SEED_EVENTS = ("download_complete", "subscribe_complete", "signin_failed")
-
 class SeedConnectionIn(BaseModel):
     kind: Literal["qbittorrent", "moviepilot"]
     name: str = Field(default="", max_length=64)

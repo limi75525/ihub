@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.v1.auth import ALLOWED_IMAGE_TYPES
+from app.services.uploads import ALLOWED_IMAGE_TYPES
 from app.core.netutil import safe_logo_url
 from app.core.timeutil import as_utc
 from app.core.deps import get_current_user, get_media_user
@@ -107,7 +107,7 @@ async def _read_logo(file: UploadFile | None) -> tuple[bytes, str] | None:
     data = await read_limited(file, MAX_LOGO_SIZE, "Logo 图片不能超过 2MB")
     if ext == ".svg":
         # 与头像/头像库同策略：剥除脚本/事件属性/javascript: 目标（含实体编码与 SMIL 注入）
-        from app.api.v1.auth import sanitize_svg
+        from app.services.uploads import sanitize_svg
 
         data = await run_in_threadpool(sanitize_svg, data)
         if not data:
@@ -238,6 +238,6 @@ def get_logo(
     path = data_dirs.resolve_rel(link.logo_path)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 不存在")
-    from app.api.v1.auth import media_file_headers
+    from app.services.uploads import media_file_headers
 
     return FileResponse(path, headers=media_file_headers(path))

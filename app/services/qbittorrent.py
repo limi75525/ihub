@@ -10,37 +10,27 @@ qB 4.x / 5.x 兼容点：
 from __future__ import annotations
 
 import http.cookiejar
-import json
 import secrets
-import ssl
 import threading
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import (
-    HTTPCookieProcessor,
-    HTTPSHandler,
-    Request,
-    build_opener,
-)
+from urllib.request import HTTPCookieProcessor, Request
 
 from app.services.seed_common import (
+    BreakerTransport,
     SeedAuthError,
     SeedError,
-    is_connect_refused,
     normalize_base_url,
     parse_json,
 )
 
 DEFAULT_TIMEOUT = 8
 ACTION_TIMEOUT = 20
-# 连接失败熔断窗口（与 moviepilot.py 同语义）：qB 不可达时 30s 内秒回同一错误，
-# 避免概览轮询反复撞超时占满线程池/DB 连接池
-BREAKER_COOLDOWN = 30.0
-MAX_RESPONSE = 32 * 1024 * 1024
 
 
-class QbClient:
+class QbClient(BreakerTransport):
+    service_name = "qBittorrent"
+
     def __init__(
         self,
         base_url: str,
@@ -50,6 +40,7 @@ class QbClient:
         auth_mode: str = "password",
         verify_tls: bool = True,
     ) -> None:
+        super().__init__()
         self.base_url = normalize_base_url(base_url)
         self.username = username or ""
         self.password = password or ""
@@ -64,41 +55,17 @@ class QbClient:
         self._login_retry_at = 0.0
         self._login_fail_count = 0
         self._jar = http.cookiejar.CookieJar()
-        handlers = [HTTPCookieProcessor(self._jar)]
-        if self.base_url.lower().startswith("https://"):
-            ctx = ssl.create_default_context()
-            if not verify_tls:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-            handlers.append(HTTPSHandler(context=ctx))
-        self._opener = build_opener(*handlers)
-        # 连接熔断状态（与登录冷却相互独立）：客户端实例与连接一一对应
-        self._fail_lock = threading.Lock()
-        self._fail_until = 0.0
-        self._fail_msg = ""
-        self._breaker_suspended = False
+        self._init_opener(verify_tls, handlers=[HTTPCookieProcessor(self._jar)])
 
-    # ---- 连接熔断 ----
-    def _breaker_check(self) -> None:
-        if self._breaker_suspended:
-            return
-        with self._fail_lock:
-            active = time.monotonic() < self._fail_until
-            msg = self._fail_msg
-        if active and msg:
-            raise SeedError(msg, 503)
-
-    def _breaker_record(self, msg: str) -> None:
-        if self._breaker_suspended:
-            return
-        with self._fail_lock:
-            self._fail_until = time.monotonic() + BREAKER_COOLDOWN
-            self._fail_msg = msg
-
-    def _breaker_clear(self) -> None:
-        with self._fail_lock:
-            self._fail_until = 0.0
-            self._fail_msg = ""
+    # ---- HTTPError 分类 ----
+    def _http_error(self, code: int, detail: str, reason) -> Exception:
+        if code == 401:
+            return SeedAuthError("qBittorrent 认证失败，请检查用户名/密码或白名单设置")
+        if code == 403:
+            return SeedAuthError(
+                "qBittorrent 拒绝访问（403）：可能是 IP 被临时封禁或白名单限制，请稍后重试"
+            )
+        return SeedError(f"qBittorrent 返回 {code}：{detail or ''}", 502)
 
     # ---- 底层请求 ----
     def _request(
@@ -123,39 +90,7 @@ class QbClient:
         }
         req_headers.update(headers or {})
         req = Request(url, data=data, method=method, headers=req_headers)
-        self._breaker_check()
-        # 连接在建立前被拒（高并发突发下偶发 RST/DNS 抖动）时，请求未被 qB 处理，
-        # 退避后重试一次是安全的；超时不重试（可能已受理，避免写操作重复执行）
-        for attempt in range(2):
-            try:
-                with self._opener.open(req, timeout=timeout) as resp:
-                    body = resp.read(MAX_RESPONSE)
-                    result = (resp.status, body, dict(resp.headers))
-                self._breaker_clear()
-                return result
-            except HTTPError as e:
-                self._breaker_clear()
-                body = b""
-                try:
-                    body = e.read(4096)
-                except Exception:
-                    pass
-                detail = body.decode("utf-8", "replace").strip()[:200]
-                if e.code == 401:
-                    raise SeedAuthError("qBittorrent 认证失败，请检查用户名/密码或白名单设置")
-                if e.code == 403:
-                    raise SeedAuthError(
-                        "qBittorrent 拒绝访问（403）：可能是 IP 被临时封禁或白名单限制，请稍后重试"
-                    )
-                raise SeedError(f"qBittorrent 返回 {e.code}：{detail or e.reason}", 502)
-            except (URLError, TimeoutError, OSError) as e:
-                reason = str(getattr(e, "reason", None) or e)
-                if attempt == 0 and is_connect_refused(e):
-                    time.sleep(0.5)
-                    continue
-                msg = f"无法连接 qBittorrent：{reason}"
-                self._breaker_record(msg)
-                raise SeedError(msg, 503)
+        return self._transport_request(req, timeout=timeout)
 
     def _json(self, method: str, path: str, **kwargs):
         # 必须走 _api：它会先登录/续期 SID。直接 _request 会在新客户端上
@@ -524,5 +459,3 @@ class QbClient:
             raise SeedError("qBittorrent 添加种子文件失败", 502)
 
 
-def safe_json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)

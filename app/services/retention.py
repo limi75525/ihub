@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.session import SessionLocal
 from app.models.message import Message
-from app.models.system_setting import get_setting, set_setting
+from app.db.settings_repo import get_setting, set_setting
 from app.services.ingest_service import delete_attachments
 
 logger = logging.getLogger(__name__)

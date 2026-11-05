@@ -24,7 +24,7 @@ from app.models.user import User
 router = APIRouter(prefix="/transfer", tags=["transfer"])
 
 MAX_TEXT_LEN = 10_000
-from app.models.system_setting import get_int_setting
+from app.db.settings_repo import get_int_setting
 from app.core import data_dirs
 
 ATTACH_MIN_MB, ATTACH_MAX_MB = 1, 2048
@@ -345,9 +345,14 @@ def list_items(
     return {"items": [_item_out(t) for t in rows]}
 
 
+class SendTextIn(BaseModel):
+    # 前端只发 {"content": ...}；其余未知字段 Pydantic 默认忽略（契约不变）
+    content: str = ""
+
+
 @router.post("/text")
-def send_text(body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    content = (body or {}).get("content", "")
+def send_text(body: SendTextIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    content = body.content
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(400, "内容不能为空")
     if len(content) > MAX_TEXT_LEN:

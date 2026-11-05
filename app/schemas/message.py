@@ -43,12 +43,3 @@ class MessageListOut(BaseModel):
 class BatchActionIn(BaseModel):
     action: str = Field(pattern="^(read|unread|delete|star|unstar|pin|unpin)$")
     ids: list[int] = Field(min_length=1, max_length=500)
-
-
-    timestamp: int | None = None
-
-    def get_content(self) -> str:
-        return self.content or self.msg or self.text or ""
-
-    def get_sender(self) -> str:
-        return self.sender or self.from_ or ""

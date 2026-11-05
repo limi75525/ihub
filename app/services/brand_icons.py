@@ -19,6 +19,7 @@ import shutil
 import tarfile
 import threading
 import time
+import urllib.error
 import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlparse
@@ -188,27 +189,33 @@ def remove_lib(lib_id: str) -> bool:
 
 # ---------------- 下载与解包 ----------------
 
-def _http_get(url: str, timeout: int = 120) -> bytes:
-    import urllib.error
-    import urllib.request
+def _assert_public_http_url(url: str) -> None:
+    """自定义下载地址是管理员可填的出站请求，必须拦内网（SSRF）：
+    自建内网 npm 镜像可设 IHUB_ALLOW_PRIVATE_BRAND_MIRROR=true 豁免；
+    与 logos 入口共用 core.netutil 的统一判定。"""
+    from app.core.config import settings
 
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError("只支持 http(s) 下载地址")
-    req = urllib.request.Request(url, headers={"User-Agent": "iHub-brand-icons/1"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        length = resp.headers.get("Content-Length")
-        if length and int(length) > MAX_DOWNLOAD_BYTES:
-            raise ValueError("图标库包超过大小上限")
-        buf = io.BytesIO()
-        while True:
-            chunk = resp.read(1024 * 256)
-            if not chunk:
-                break
-            buf.write(chunk)
-            if buf.tell() > MAX_DOWNLOAD_BYTES:
-                raise ValueError("图标库包超过大小上限")
-        return buf.getvalue()
+    from app.core.netutil import assert_public_http_url
+
+    assert_public_http_url(url, allow_private=settings.ALLOW_PRIVATE_BRAND_MIRROR)
+
+
+def _http_get(url: str, timeout: int = 120) -> bytes:
+    from app.core.config import settings
+
+    from app.core.netutil import safe_fetch
+
+    try:
+        _, _, data = safe_fetch(
+            url,
+            timeout=timeout,
+            max_bytes=MAX_DOWNLOAD_BYTES,
+            user_agent="iHub-brand-icons/1",
+            allow_private=settings.ALLOW_PRIVATE_BRAND_MIRROR,
+        )
+        return data
+    except ValueError:
+        raise
 
 
 def _resolve_tarball(pkg: str, version_hint: str = "") -> tuple[str, str]:
@@ -416,11 +423,21 @@ _TASKS: dict[str, dict] = {}
 _TASK_LOCK = threading.Lock()
 
 
+_TASK_TTL = 30 * 60  # 已结束任务保留 30 分钟供前端轮询收尾，之后回收
+
+
 def _task_set(task_id: str, **kw) -> None:
     with _TASK_LOCK:
         task = _TASKS.setdefault(task_id, {})
         task.update(kw)
         task["updated_at"] = int(time.time())
+        # 任务 dict 无界增长回收：只清已结束且超时的，进行中的任务不动
+        if len(_TASKS) > 50:
+            now_ts = time.time()
+            for tid, t in list(_TASKS.items()):
+                state = str(t.get("state") or "")
+                if state in ("done", "error") and now_ts - float(t.get("updated_at") or 0) > _TASK_TTL:
+                    _TASKS.pop(tid, None)
 
 
 def task_state(task_id: str) -> dict:
@@ -882,6 +899,3 @@ def icon_bytes(lib_id: str, slug: str, color: str = "") -> tuple[bytes, str]:
     return path.read_bytes(), "image/svg+xml"
 
 
-def usage_breakdown() -> dict[str, int]:
-    """统计各库被引用次数（用于卸载前提醒），由 API 层注入 DB 查询结果。"""
-    return {}

@@ -16,7 +16,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit
 
-from app.models.system_setting import get_setting
+from app.db.settings_repo import get_setting
 
 PROXY_KEY = "network_proxy"
 EXTRA_KEY = "network_proxy_extra_domains"

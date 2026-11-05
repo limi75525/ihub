@@ -51,8 +51,12 @@ from app.models.video_item import VideoItem
 from app.services.seed_covers import proxy_url
 from app.services.seed_prewarm import PREWARM_TTL
 from app.services.seed_common import SeedError, normalize_base_url
+from app.core.errors import UpstreamError
 from app.services.seed_service import (
     ALL_TABS,
+    _ALL_MEDIA_API_TYPES,
+    _MEDIA_TYPE_CN,
+    _resolve_medias,
     allowed_tabs,
     cached,
     cache_drop,
@@ -77,6 +81,12 @@ from app.services.seed_service import (
 )
 
 router = APIRouter(prefix="/seeds", tags=["seeds"])
+
+# 缓存 TTL：qB 数据变化快用秒级；MP 配置类 5 分钟；站点图标/季集/详情等静数据 24 小时
+_QB_LIST_TTL = 3.0
+_QB_DETAIL_TTL = 5.0
+_MP_CFG_TTL = 300.0
+_MP_DAY_TTL = 86400.0
 
 logger = logging.getLogger(__name__)
 audit = logging.getLogger("ihub.seed.control")
@@ -392,7 +402,7 @@ def seed_overview(
             qb_data = cached(conn.id, "qb:summary", 2.0, lambda: _qb_summary(conn), force=fresh)
         except SeedError as e:
             errors.append(f"qBittorrent：{e.message}")
-        except HTTPException:
+        except (HTTPException, UpstreamError):
             pass
 
     if "subscription" in tabs or "sites" in tabs or "brush" in tabs:
@@ -403,7 +413,7 @@ def seed_overview(
             )
         except SeedError as e:
             errors.append(f"MoviePilot：{e.message}")
-        except HTTPException:
+        except (HTTPException, UpstreamError):
             pass
 
     # 概览成功读取时会先建立 qB/MP 客户端会话；此时再启动事件线程可复用它，
@@ -512,7 +522,7 @@ def qb_torrents(
     items = cached(
         conn.id,
         f"qb:list:{filter or ''}:{category or ''}:{tag or ''}",
-        3.0,
+        _QB_LIST_TTL,
         lambda: load(fresh),
         force=fresh,
     )
@@ -540,7 +550,7 @@ def qb_torrents(
     page_items = items[start : start + page_size]
     try:
         attach_download_media(_mp_conn(db), page_items, refresh=fresh)
-    except HTTPException:
+    except (HTTPException, UpstreamError):
         # 没配 MP 时下载页仍按纯 qB 工作
         pass
     return {
@@ -603,7 +613,7 @@ def qb_torrent_detail(
                 logger.debug("种子详情媒体信息读取失败：%s", e)
         return out
 
-    return cached(conn.id, f"qb:detail:{torrent_hash}", 5.0, load)
+    return cached(conn.id, f"qb:detail:{torrent_hash}", _QB_DETAIL_TTL, load)
 
 
 @router.get("/qb/categories")
@@ -643,7 +653,9 @@ def qb_bulk_action(
     conn = _qb_conn(db)
     hashes = _clean_hashes(body.hashes)
     qb_client(conn).actions(hashes, body.action)
-    invalidate_connection(conn.id)
+    # 只清列表缓存：invalidate_connection 会连 qB 会话一起丢，
+    # 页面轮询/事件线程重登会与旧会话互踢（短暂 403），与转媒体同口径
+    invalidate_qb_list(conn.id)
     audit.info(
         "种子控制：user=%s op=bulk_%s count=%s result=ok",
         admin.username, body.action, len(hashes),
@@ -663,7 +675,7 @@ def qb_bulk_delete(
     conn = _qb_conn(db)
     hashes = _clean_hashes(body.hashes)
     qb_client(conn).delete_many(hashes, body.delete_files)
-    invalidate_connection(conn.id)
+    invalidate_qb_list(conn.id)
     audit.info(
         "种子控制：user=%s op=bulk_delete count=%s delete_files=%s result=ok",
         admin.username, len(hashes), body.delete_files,
@@ -680,7 +692,7 @@ def qb_action(
 ):
     conn = _qb_conn(db)
     qb_client(conn).action(torrent_hash, body.action)
-    invalidate_connection(conn.id)
+    invalidate_qb_list(conn.id)
     audit.info("种子控制：user=%s op=%s hash=%s result=ok", admin.username, body.action, torrent_hash)
     return {"ok": True}
 
@@ -697,7 +709,7 @@ def qb_delete(
     _verify_admin_password(admin, body.password)
     conn = _qb_conn(db)
     qb_client(conn).delete(torrent_hash, body.delete_files)
-    invalidate_connection(conn.id)
+    invalidate_qb_list(conn.id)
     audit.info(
         "种子控制：user=%s op=delete hash=%s delete_files=%s result=ok",
         admin.username, torrent_hash, body.delete_files,
@@ -722,13 +734,13 @@ def _mp_conn_optional(db: Session) -> SeedConnection | None:
 
 
 def _transfer_config_out(conn: SeedConnection | None, db: Session) -> dict:
-    from app.models.system_setting import get_setting
+    from app.db.settings_repo import get_setting
 
     dirs: list[dict] = []
     note = ""
     if conn is not None:
         try:
-            dirs = cached(conn.id, "mp:transfer-dirs", 300.0, lambda: mp_client(conn).transfer_directories())
+            dirs = cached(conn.id, "mp:transfer-dirs", _MP_CFG_TTL, lambda: mp_client(conn).transfer_directories())
         except SeedError as e:
             note = e.message
 
@@ -771,7 +783,7 @@ def save_transfer_config(
     db: Session = Depends(get_db),
 ):
     """保存转媒体目录（空 = 回退默认值）。目录必须是绝对路径。"""
-    from app.models.system_setting import set_setting
+    from app.db.settings_repo import set_setting
 
     warnings: list[str] = []
     labels = {"tv": "电视", "movie": "电影"}
@@ -837,7 +849,7 @@ def qb_add(
         tags=body.tags,
         paused=body.paused,
     )
-    invalidate_connection(conn.id)
+    invalidate_qb_list(conn.id)
     audit.info("种子控制：user=%s op=add_url result=ok", admin.username)
     return {"ok": True}
 
@@ -867,7 +879,7 @@ async def qb_add_file(
         tags=tags,
         paused=paused,
     )
-    invalidate_connection(conn.id)
+    invalidate_qb_list(conn.id)
     audit.info("种子控制：user=%s op=add_file result=ok", admin.username)
     return {"ok": True}
 
@@ -1081,7 +1093,7 @@ def mp_sites(
     return cached(
         conn.id,
         f"mp:sites:{'account' if include_account else 'basic'}",
-        300.0,
+        _MP_CFG_TTL,
         load,
         force=fresh,
     )
@@ -1106,7 +1118,7 @@ def mp_site_icon(
     def load() -> str:
         return _site_icon_safe(mp_client(conn), site_id)
 
-    data_url = cached(conn.id, f"mp:site-icon:{site_id}", 86400.0, load)
+    data_url = cached(conn.id, f"mp:site-icon:{site_id}", _MP_DAY_TTL, load)
     if not data_url.startswith("data:") or "," not in data_url:
         raise HTTPException(404, "站点暂无图标")
     try:
@@ -1154,7 +1166,7 @@ def mp_search_sites(
     def load() -> dict:
         return {"ids": mp_client(conn).search_site_ids()}
 
-    return cached(conn.id, "mp:search-sites", 300.0, load)
+    return cached(conn.id, "mp:search-sites", _MP_CFG_TTL, load)
 
 
 @router.get("/mp/sites/{site_id}/test")
@@ -1249,182 +1261,6 @@ def _site_status(client) -> dict:
     return info
 
 
-_MEDIA_TYPE_CN = {"movie": "电影", "tv": "电视剧", "music": "音乐"}
-_ALL_MEDIA_API_TYPES = ("media", "music", "collection", "person")
-_SEASON_SUFFIX_RE = re.compile(
-    r"\s*(?:第[一二三四五六七八九十0-9]+季|Season\s*\d+|S\d{1,2})\s*$", re.I
-)
-
-
-def _seasonless_title(value: str) -> str:
-    """去掉标题末尾的季标记（第N季 / Season N / Sxx），用于跨语言、跨季匹配。"""
-    text = str(value or "").strip()
-    while True:
-        stripped = _SEASON_SUFFIX_RE.sub("", text).strip()
-        if stripped == text:
-            return text
-        text = stripped
-
-
-def _title_key(value: str) -> str:
-    """标题比对键：去空白与常见分隔符、忽略大小写。"""
-    return re.sub(r"[\s·・\-_:：,，.。'’\"“”]+", "", str(value or "")).lower()
-
-
-def _seasonless_key(value: str) -> str:
-    """去掉「第N季 / Season N / Sxx」后再比对；只用于详情兜底，避免季条目抢在主媒体前面。"""
-    return _title_key(_seasonless_title(value))
-
-
-def _media_title_values(media: dict) -> list[str]:
-    values = [
-        media.get("title"),
-        media.get("en_title"),
-        media.get("hk_title"),
-        media.get("tw_title"),
-        media.get("sg_title"),
-        media.get("original_title"),
-        media.get("original_name"),
-    ]
-    names = media.get("names")
-    if isinstance(names, list):
-        values.extend(names)
-    return [str(v) for v in values if v]
-
-
-def _media_ready(media: dict) -> bool:
-    return (
-        isinstance(media, dict)
-        and bool(media.get("media_id") or media.get("tmdb_id"))
-        and bool(media.get("media_source"))
-    )
-
-
-def _media_matches(media: dict, key: str, type_cn: str | None, *, seasonless: bool = False) -> bool:
-    if not _media_ready(media):
-        return False
-    if type_cn and str(media.get("type") or "") != type_cn:
-        return False
-    normalize = _seasonless_key if seasonless else _title_key
-    return any(normalize(v) == key for v in _media_title_values(media))
-
-
-def _media_confident(media: dict) -> bool:
-    """详情兜底只查高置信候选，避免把 HDR/FRDS 这类关键词误判成媒体。"""
-    try:
-        popularity = float(media.get("popularity") or 0)
-    except (TypeError, ValueError):
-        popularity = 0.0
-    try:
-        votes = int(media.get("vote_count") or 0)
-    except (TypeError, ValueError):
-        votes = 0
-    return popularity >= 1.0 or votes >= 10
-
-
-def _resolve_medias(
-    client, keyword: str, type_cn: str | None, api_types: tuple[str, ...]
-) -> list[dict]:
-    """关键词 → 同名媒体列表（MP 资源搜索的第一步）。
-
-    站点资源往往只索引英文名/别名（如爱情公寓 → Ipartment、黑帮领地 → MobLand），
-    纯中文关键词走 /search/title 搜不到。MP 搜索页的做法是先解析媒体、再按媒体 ID
-    搜站点。这里只认同名（宁缺毋滥）：搜发行组、分辨率等非媒体关键词解析不出来，
-    回退纯关键词搜索。
-
-    中文名可能只存在于媒体详情的 title/names 里（TMDB 主标题是英文时，
-    如黑帮领地 → MobLand），所以搜索摘要没有同名时会再查前几个高置信候选的详情。
-    """
-    key = _title_key(keyword)
-    if not key:
-        return []
-    candidates: list[dict] = []
-    for api_type in api_types:
-        try:
-            found = client.media_search(keyword, count=50, api_type=api_type)
-        except (SeedError, HTTPException):
-            continue
-        for media in found or []:
-            if not _media_ready(media):
-                continue
-            if type_cn and str(media.get("type") or "") != type_cn:
-                continue
-            candidates.append(media)
-    if not candidates:
-        return []
-
-    matched: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add(media: dict) -> None:
-        ident = (
-            str(media.get("media_source") or ""),
-            str(media.get("media_id") or media.get("tmdb_id") or ""),
-            str(media.get("type") or ""),
-        )
-        if not ident[1] or ident in seen:
-            return
-        seen.add(ident)
-        matched.append(media)
-
-    # 1) 搜索摘要自带标题（快）；「全部类型」会保留电影/剧集/音乐等同名结果。
-    for media in candidates:
-        if _media_matches(media, key, type_cn):
-            add(media)
-
-    # 2) 摘要没有同名时，先按媒体 ID 搜 1 条探 media_info（通常 1~3 秒，已带中文标题）；
-    #    站点没有任何结果时才退回详情（电视剧首查可能十几秒）。
-    if not matched:
-        probed = 0
-        seasonless = _seasonless_key(keyword)
-        for media in candidates:
-            if probed >= 2:
-                break
-            if not _media_confident(media):
-                continue
-            probed += 1
-            mid = str(media.get("media_id") or media.get("tmdb_id") or "")
-            source = str(media.get("media_source") or "")
-            kind = str(media.get("type") or "")
-            try:
-                probe = client.search_torrents(mid, source, mtype=kind, count=1)
-            except SeedError:
-                probe = []
-            info = probe[0].get("media_info") if probe and isinstance(probe[0], dict) else None
-            if isinstance(info, dict) and info:
-                merged = {**media, **info}
-                merged["media_source"] = info.get("media_source") or source
-                merged["media_id"] = info.get("media_id") or mid
-                if _media_matches(merged, seasonless, type_cn, seasonless=True):
-                    add(merged)
-                # media_info 已经是该 ID 的权威标题；不同名说明候选不对，不再拉慢详情
-                continue
-            try:
-                detail = client.media_detail(mid, source, kind, timeout=20)
-            except (SeedError, HTTPException):
-                continue
-            if not isinstance(detail, dict):
-                continue
-            merged = {**media, **detail}
-            merged["media_source"] = detail.get("media_source") or media.get("media_source")
-            merged["media_id"] = (
-                detail.get("media_id") or media.get("media_id") or detail.get("tmdb_id")
-            )
-            if _media_matches(merged, seasonless, type_cn, seasonless=True):
-                add(merged)
-
-    # 指定类型只查最匹配的一部；「全部」每种类型只查最匹配的一部
-    # （同一部剧的 TMDB/豆瓣重复条目会并发/串行打站点，全部查会把搜索拖到一分钟）。
-    if type_cn:
-        return matched[:1]
-    per_type: dict[str, dict] = {}
-    for media in matched:
-        kind = str(media.get("type") or "")
-        if kind not in per_type:
-            per_type[kind] = media
-    return list(per_type.values())[:4]
-
-
 def _torrent_marker(row: dict) -> tuple:
     """跨媒体聚合时的去重键：优先 MP 的 torrent id/enclosure，其次站点+标题+体积。"""
     torrent = row.get("torrent_info") if isinstance(row.get("torrent_info"), dict) else {}
@@ -1512,7 +1348,7 @@ def mp_episodes(
     image_base = get_cfg(db, "video_tmdb_image_base") or tmdb.IMAGE_DEFAULT
     try:
         conn = _mp_conn(db)
-    except HTTPException:
+    except (HTTPException, UpstreamError):
         conn = None
 
     def load_episodes() -> list[dict]:
@@ -1553,7 +1389,7 @@ def mp_episodes(
 
     # MP/TMDB 的季集数短期内不变，24h 缓存；详情页反复展开季不再每次穿透
     if conn is not None:
-        items = cached(conn.id, f"mp:episodes:{tmdb_id}:{season}", 86400.0, load_episodes)
+        items = cached(conn.id, f"mp:episodes:{tmdb_id}:{season}", _MP_DAY_TTL, load_episodes)
     else:
         items = load_episodes()
     # 绿联/本地影视库的已入库集号：按剧名（中文原名兜底）匹配剧集条目
@@ -1620,10 +1456,21 @@ def mp_subscribe_state(
     conn = _mp_conn(db)
 
     def load() -> list:
-        return mp_client(conn).subscriptions() or []
+        # 默认 count=50 只覆盖前 50 条订阅，订阅更多时后面的剧在详情页永远「未订阅」；
+        # 翻页拉全（上限兜底，正常实例几十条足够）
+        client = mp_client(conn)
+        rows: list = []
+        for page in range(1, 6):
+            batch = client.subscriptions(page=page, count=200)
+            if not batch:
+                break
+            rows.extend(batch)
+            if len(batch) < 200:
+                break
+        return rows
 
     # 详情页每次挂载都查订阅状态；订阅列表 5 分钟内复用，写订阅时 cache_drop 失效
-    rows = cached(conn.id, "mp:subscribe-rows", 300.0, load)
+    rows = cached(conn.id, "mp:subscribe-rows", _MP_CFG_TTL, load)
     seasons = sorted({
         int(x.get("season") or 0)
         for x in rows
@@ -1692,7 +1539,7 @@ def mp_media_detail_endpoint(
     # MP 电视剧首查会现拉 TMDB 的季/演职员（可达十几秒）；详情 24h 内直接复用
     # （前端还有会话级缓存，这里兜底跨会话/重启前的重复拉取）
     key = f"mp:media-detail:{media_source}:{media_id}:{zh_type}"
-    detail = cached(conn.id, key, 86400.0, load)
+    detail = cached(conn.id, key, _MP_DAY_TTL, load)
     # 演员头像只在详情页出现且无列表预热覆盖，这里补预热（后台线程，不阻塞响应）
     _prewarm_detail_arts(detail)
     return {"detail": detail}
@@ -1872,3 +1719,297 @@ def mp_brush_task(
         15.0,
         lambda: mp_client(conn).brush_task(task_id),
     )
+
+# ---- 刷流任务编辑（字段与 MP BrushFlow BrushTaskPayload 一比一；写操作走管理员） ----
+
+_BRUSH_TASK_INT_FIELDS = {
+    "brush_interval": (1, 1440, 10),
+    "check_interval": (1, 1440, 5),
+}
+_BRUSH_TASK_NUM_FIELDS = {
+    "site_ratio_target", "disksize", "maxupspeed", "maxdlspeed", "maxdlcount",
+    "seed_time", "hr_seed_time", "seed_ratio", "seed_size", "download_time",
+    "seed_avgspeed", "seed_inactivetime", "up_speed", "dl_speed", "auto_archive_days",
+    "timezone_offset",
+}
+_BRUSH_TASK_TEXT_FIELDS = {
+    "cron", "active_time_range", "include", "exclude", "size", "seeder", "pubtime",
+    "delete_size_range", "save_path", "delete_except_tags", "qb_category", "tag",
+}
+_BRUSH_TASK_ENUM_FIELDS = {
+    "freeleech": {"", "free", "2xfree"},
+    "hr": {"yes", "no"},
+}
+_BRUSH_TASK_BOOL_FIELDS = {
+    "enabled", "notify", "site_ratio_control", "except_subscribe", "proxy_delete",
+    "del_no_free", "site_hr_active", "site_skip_tips", "rss_support",
+}
+
+
+def _brush_task_payload(body: dict) -> dict:
+    """把前端提交的任务表单规范成 BrushTaskPayload 兼容的 payload。
+
+    规则照抄 MP 插件的 normalizeTask：可选数字空串/0 转 None（0 表示不限）；
+    可选文本 trim 转 None；枚举白名单校验；布尔强转。未知字段忽略。"""
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "任务名称不能为空")
+    out = {"name": name[:80]}
+    try:
+        site_id = int(body.get("site_id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "站点无效")
+    if site_id <= 0:
+        raise HTTPException(400, "请选择站点")
+    out["site_id"] = site_id
+    downloader = str(body.get("downloader") or "").strip()
+    if not downloader:
+        raise HTTPException(400, "请选择下载器")
+    out["downloader"] = downloader[:80]
+
+    for key, (lo, hi, default) in _BRUSH_TASK_INT_FIELDS.items():
+        raw = body.get(key)
+        if raw in (None, ""):
+            out[key] = default
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "调度间隔必须是整数（分钟）")
+        if not lo <= value <= hi:
+            raise HTTPException(400, f"调度间隔需在 {lo}-{hi} 分钟之间")
+        out[key] = value
+
+    for key in _BRUSH_TASK_NUM_FIELDS:
+        raw = body.get(key)
+        if raw in (None, ""):
+            out[key] = None
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "数值字段格式不正确")
+        out[key] = None if value == 0 else value
+
+    for key in _BRUSH_TASK_TEXT_FIELDS:
+        out[key] = str(body.get(key) or "").strip() or None
+
+    for key, allowed in _BRUSH_TASK_ENUM_FIELDS.items():
+        value = str(body.get(key) or "")
+        if value not in allowed:
+            raise HTTPException(400, "促销/HR 取值无效")
+        out[key] = value
+
+    for key in _BRUSH_TASK_BOOL_FIELDS:
+        out[key] = bool(body.get(key))
+
+    if out["site_ratio_control"] and out["site_ratio_target"] is None:
+        raise HTTPException(400, "启用站点分享率控制时必须设置目标分享率")
+    if out.get("tag") and "," in out["tag"]:
+        raise HTTPException(400, "下载器标签不能包含逗号")
+    return out
+
+
+@router.post("/mp/brush/tasks")
+def mp_brush_task_create(
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """新建刷流任务（透传 MP BrushFlow POST /tasks）。"""
+    require_tab(admin, db, "brush")
+    conn = _mp_conn(db)
+    payload = _brush_task_payload(body)
+    result = mp_client(conn).brush_task_create(payload)
+    cache_drop(conn.id, "mp:brush")
+    audit.info("刷流任务：user=%s op=create name=%s site=%s", admin.username, payload["name"], payload["site_id"])
+    return {"ok": True, "result": result}
+
+
+@router.put("/mp/brush/tasks/{task_id}")
+def mp_brush_task_update(
+    task_id: str,
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """更新刷流任务（透传 MP BrushFlow PUT /tasks/{task_id}）。"""
+    require_tab(admin, db, "brush")
+    conn = _mp_conn(db)
+    payload = _brush_task_payload(body)
+    result = mp_client(conn).brush_task_update(task_id, payload)
+    cache_drop(conn.id, "mp:brush")
+    cache_drop(conn.id, "mp:brush:task:" + task_id)
+    audit.info("刷流任务：user=%s op=update id=%s name=%s", admin.username, task_id, payload["name"])
+    return {"ok": True, "result": result}
+
+
+@router.delete("/mp/brush/tasks/{task_id}")
+def mp_brush_task_delete(
+    task_id: str,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """删除刷流任务（透传 MP BrushFlow DELETE；只删任务本身，不动 MP 其他配置）。"""
+    require_tab(admin, db, "brush")
+    conn = _mp_conn(db)
+    mp_client(conn).brush_task_delete(task_id)
+    cache_drop(conn.id, "mp:brush")
+    cache_drop(conn.id, "mp:brush:task:" + task_id)
+    audit.info("刷流任务：user=%s op=delete id=%s", admin.username, task_id)
+    return {"ok": True}
+
+
+@router.post("/mp/brush/tasks/{task_id}/state")
+def mp_brush_task_state(
+    task_id: str,
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """启用/暂停刷流任务。"""
+    require_tab(admin, db, "brush")
+    conn = _mp_conn(db)
+    result = mp_client(conn).brush_task_set_state(task_id, bool(body.get("enabled")))
+    cache_drop(conn.id, "mp:brush")
+    cache_drop(conn.id, "mp:brush:task:" + task_id)
+    audit.info("刷流任务：user=%s op=state id=%s enabled=%s", admin.username, task_id, bool(body.get("enabled")))
+    return {"ok": True, "result": result}
+
+
+@router.post("/mp/brush/tasks/{task_id}/run")
+def mp_brush_task_run(
+    task_id: str,
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """立即执行：kind=run 刷流 / check 检查 / clear 清除任务数据。"""
+    require_tab(admin, db, "brush")
+    conn = _mp_conn(db)
+    kind = str(body.get("kind") or "run")
+    result = mp_client(conn).brush_task_run(task_id, kind)
+    cache_drop(conn.id, "mp:brush")
+    cache_drop(conn.id, "mp:brush:task:" + task_id)
+    audit.info("刷流任务：user=%s op=%s id=%s", admin.username, kind, task_id)
+    return {"ok": True, "result": result}
+
+
+# ---- 站点管理（走 MP /api/v1/site；字段与 MP SiteAddEditDialog 一致） ----
+
+_SITE_TEXT_FIELDS = ("rss", "cookie", "ua", "token", "apikey", "downloader", "note", "filter")
+_SITE_INT_FIELDS = ("pri", "timeout", "limit_interval", "limit_count", "limit_seconds")
+
+
+def _site_payload(body: dict) -> dict:
+    """站点表单转 MP Site schema 兼容 payload（url/name 必填，domain 缺省从 url 推导）。"""
+    url = str(body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "站点地址不能为空")
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "站点地址必须是 http(s) 链接")
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "站点名称不能为空")
+    domain = str(body.get("domain") or "").strip().lower()
+    if not domain:
+        from urllib.parse import urlsplit
+
+        domain = (urlsplit(url).hostname or "").strip().lower()
+    if not domain:
+        raise HTTPException(400, "无法从地址解析域名，请手动填写域名")
+    out = {"url": url[:1024], "name": name[:256], "domain": domain[:256]}
+    for key in _SITE_TEXT_FIELDS:
+        value = body.get(key)
+        if value is None:
+            continue
+        limit = 8192 if key == "cookie" else 1024
+        out[key] = str(value)[:limit]
+    for key in _SITE_INT_FIELDS:
+        raw = body.get(key)
+        if raw in (None, ""):
+            out[key] = 0
+            continue
+        try:
+            out[key] = max(0, int(raw))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "数值字段格式不正确")
+    out["pri"] = min(out.get("pri", 0), 100)
+    out["is_active"] = bool(body.get("is_active", True))
+    out["proxy"] = 1 if body.get("proxy") else 0
+    out["render"] = 1 if body.get("render") else 0
+    return out
+
+
+@router.get("/mp/site-options")
+def mp_site_options(
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """站点编辑弹窗辅助数据：下载器列表。"""
+    conn = _mp_conn(db)
+    return mp_client(conn).site_options()
+
+
+@router.post("/mp/sites")
+def mp_site_create(
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """在 MoviePilot 新增站点（POST /api/v1/site/）。"""
+    require_tab(admin, db, "sites")
+    conn = _mp_conn(db)
+    payload = _site_payload(body)
+    result = mp_client(conn).site_create(payload)
+    cache_drop(conn.id, "mp:sites")
+    audit.info("站点管理：user=%s op=create name=%s domain=%s", admin.username, payload["name"], payload["domain"])
+    return {"ok": True, "result": result}
+
+
+@router.put("/mp/sites/{site_id}")
+def mp_site_update(
+    site_id: int,
+    body: dict,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """更新 MoviePilot 站点（PUT /api/v1/site/，body 携带 id）。"""
+    require_tab(admin, db, "sites")
+    conn = _mp_conn(db)
+    payload = _site_payload(body)
+    payload["id"] = int(site_id)
+    result = mp_client(conn).site_update(payload)
+    cache_drop(conn.id, "mp:sites")
+    audit.info("站点管理：user=%s op=update id=%s name=%s", admin.username, site_id, payload["name"])
+    return {"ok": True, "result": result}
+
+
+@router.get("/mp/sites/{site_id}/detail")
+def mp_site_detail(
+    site_id: int,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """站点编辑回显（GET /api/v1/site/{id}，含 cookie 等敏感字段，仅管理员）。"""
+    require_tab(admin, db, "sites")
+    conn = _mp_conn(db)
+    return mp_client(conn).site_detail(site_id)
+
+
+@router.delete("/mp/sites/{site_id}")
+def mp_site_delete(
+    site_id: int,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """删除 MoviePilot 站点（DELETE /api/v1/site/{id}）。"""
+    require_tab(admin, db, "sites")
+    conn = _mp_conn(db)
+    mp_client(conn).site_delete(site_id)
+    cache_drop(conn.id, "mp:sites")
+    audit.info("站点管理：user=%s op=delete id=%s", admin.username, site_id)
+    return {"ok": True}
+
+
+

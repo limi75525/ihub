@@ -282,30 +282,16 @@ def save_progress(
 
 @router.delete("/{book_id}")
 def delete_book(book_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    from app.api.v1.recycle import recycle_enabled
+    from app.services.recycle_service import recycle_enabled
 
     book = _own_book(db, user, book_id)
     if recycle_enabled():
         book.is_deleted = True
         book.deleted_at = datetime.now(timezone.utc)
     else:
-        _purge_book(db, book)
+        book_service.purge_book(db, book)
     db.commit()
     return {"ok": True}
-
-
-def _purge_book(db: Session, book: Book) -> None:
-    """物理删除：书籍文件、封面、章节与进度一并清除。"""
-    if book.file_path:
-        p = data_dirs.resolve_rel(book.file_path)
-        if p:
-            p.unlink(missing_ok=True)
-    cp = data_dirs.resolve_rel(book.cover_path)
-    if cp:
-        cp.unlink(missing_ok=True)
-    db.query(BookChapter).filter(BookChapter.book_id == book.id).delete(synchronize_session=False)
-    db.query(BookProgress).filter(BookProgress.book_id == book.id).delete(synchronize_session=False)
-    db.delete(book)
 
 
 @router.get("/{book_id}/file")

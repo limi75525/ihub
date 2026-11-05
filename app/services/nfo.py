@@ -14,6 +14,8 @@ NAS 刮削工具（tinyMediaManager、nas-tools 等）会在媒体文件旁写 N
 
 from __future__ import annotations
 
+import re
+
 import json
 import logging
 import xml.etree.ElementTree as ET
@@ -32,6 +34,16 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
 
 
+_DOCTYPE_RE = re.compile(r"<!DOCTYPE[^>\[>]*(\[[^\]]*\])?[^>]*>", re.I | re.S)
+
+
+def _strip_doctype(text: str) -> str:
+    """剥掉 DOCTYPE（内部实体唯一合法来源）：防 Billion Laughs 实体放大 DoS。
+    DTD 不承载 NFO 的业务数据，剥离不影响正常文件；解析器对实体引用
+    （&xx;）无定义时会报 ParseError，走既有的失败返回 None 路径。"""
+    return _DOCTYPE_RE.sub("", text)
+
+
 def read_element(path: Path) -> ET.Element | None:
     """读取并解析 NFO；任何失败（超限/编码/损坏 XML）返回 None，绝不抛出。"""
     try:
@@ -42,7 +54,7 @@ def read_element(path: Path) -> ET.Element | None:
     except OSError:
         return None
     try:
-        return ET.fromstring(raw)
+        return ET.fromstring(_strip_doctype(raw.decode("utf-8", "replace")))
     except (ET.ParseError, ValueError):
         pass
     # 声明与字节编码不符（GBK 内容配 UTF-8 声明等）：按 UTF-8 容错解码再试一次
@@ -50,7 +62,7 @@ def read_element(path: Path) -> ET.Element | None:
     if text.lstrip().startswith("<?xml"):
         text = text.split("?>", 1)[-1]
     try:
-        return ET.fromstring(text)
+        return ET.fromstring(_strip_doctype(text))
     except ET.ParseError:
         logger.warning("NFO 解析失败，跳过：%s", path.name)
         return None

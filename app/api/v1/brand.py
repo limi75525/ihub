@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_admin, get_current_user, get_media_user
+from app.core.sqlutil import escape_like
 from app.db.session import get_db
 from app.models.logo_group import LogoGroup
 from app.models.logo_rule import LogoRule
@@ -30,10 +31,11 @@ MAX_UPLOAD = 120 * 1024 * 1024
 
 
 def _usage(db: Session, lib_id: str) -> int:
-    like = f"/api/v1/brand/icon/{lib_id}/%"
+    # lib_id 来自 URL，须转义 LIKE 通配符：否则 "admin%" 会把其他库的引用也统计进来
+    like = f"/api/v1/brand/icon/{escape_like(lib_id)}/%"
     total = 0
     for model in (NavLink, LogoGroup, LogoRule, Source):
-        total += db.query(model).filter(model.logo_url.like(like)).count()
+        total += db.query(model).filter(model.logo_url.like(like, escape="\\")).count()
     return total
 
 

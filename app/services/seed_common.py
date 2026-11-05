@@ -1,20 +1,22 @@
-"""种子模块公共工具：异常、上游地址校验、响应解包。"""
+"""种子模块公共工具：异常、上游地址校验、响应解包、共享 HTTP 传输层。"""
 
 from __future__ import annotations
 
 import ipaddress
 import json
 import posixpath
-from urllib.parse import urlsplit
+import ssl
+import threading
+import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPSHandler, Request, build_opener
+
+from app.core.errors import UpstreamError
 
 
-class SeedError(Exception):
-    """种子上游/配置错误。status_code 供 API 层映射为 HTTP 状态。"""
-
-    def __init__(self, message: str, status_code: int = 502) -> None:
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
+class SeedError(UpstreamError):
+    """种子上游/配置错误（统一由 core.errors 的领域错误映射处理）。"""
 
 
 class SeedAuthError(SeedError):
@@ -85,6 +87,18 @@ def unwrap_mp(payload):
     return payload
 
 
+def mp_list(value) -> list:
+    """MP 分页响应统一拆包：unwrap_mp 后，字典按 items→list→data 兜底取列表。
+
+    兼容 MP 各版本/插件的分页结构（items / list / data），非字典直接透传；
+    结果不是列表时返回空列表。键序统一为 items→list→data（与现多数派一致），
+    新端点禁止再手写第四种键序变体。"""
+    data = unwrap_mp(value)
+    if isinstance(data, dict):
+        data = data.get("items") or data.get("list") or data.get("data") or []
+    return data if isinstance(data, list) else []
+
+
 def normalize_remote_path(value) -> str:
     """归一化上游返回的 NAS 路径，用于转媒体历史匹配（不做任何文件系统访问）。"""
     raw = str(value or "").strip().replace("\\", "/")
@@ -128,3 +142,103 @@ def mp_transfer_matches(
         if base and (src == base or src.startswith(base + "/")):
             return True
     return False
+
+
+# ---- 共享 HTTP 传输层（MpClient/QbClient 共用：熔断 + connect-refused 重试） ----
+
+# 连接失败熔断窗口：上游不可达时 30s 内后续请求直接秒回同一错误，不再各自干等满超时
+# （否则 5s 一轮的概览轮询 × 15s 超时会占满线程池/DB 连接池，整个平台跟着卡）
+BREAKER_COOLDOWN = 30.0
+MAX_RESPONSE = 32 * 1024 * 1024
+
+
+class BreakerTransport:
+    """MpClient / QbClient 共享的底层 HTTP 传输骨架。
+
+    统一承载：opener 构造（HTTPS + 可选跳过证书校验）、连接熔断三方法、
+    `_transport_request` 的「2 次循环 + connect-refused 退避重试 + HTTPError 分类 +
+    熔断记录」。客户端差异必须留在子类：认证方式（X-API-KEY/JWT vs Cookie 会话）、
+    请求体形态（json/form vs 原始字节/multipart）、HTTPError 的错误分类文案
+    （覆写 `_http_error`，各自文案一字不改）、上游名称（`service_name`）。
+
+    行为保持铁律（勿改）：重试只针对连接建立前被拒（is_connect_refused）、
+    退避 0.5s、共 2 次尝试；超时不重试（可能已受理，避免 POST 重复执行）；
+    熔断阈值/冷却时间/响应体上限以本模块常量为准。
+    """
+
+    # 子类须先设置 self.base_url 再调用 _init_opener（两类现状顺序即如此）
+    service_name = ""
+
+    def _init_opener(self, verify_tls: bool, handlers: list) -> None:
+        """构造 opener；handlers 由子类提供（如 qB 的 HTTPCookieProcessor）。"""
+        handlers = list(handlers)
+        if str(self.base_url).lower().startswith("https://"):
+            ctx = ssl.create_default_context()
+            if not verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            handlers.append(HTTPSHandler(context=ctx))
+        self._opener = build_opener(*handlers)
+
+    def __init__(self) -> None:
+        # 连接熔断状态：客户端实例与连接一一对应，保存连接重建时自然复位
+        self._fail_lock = threading.Lock()
+        self._fail_until = 0.0
+        self._fail_msg = ""
+        self._breaker_suspended = False
+
+    # ---- 连接熔断 ----
+    def _breaker_check(self) -> None:
+        if self._breaker_suspended:
+            return
+        with self._fail_lock:
+            active = time.monotonic() < self._fail_until
+            msg = self._fail_msg
+        if active and msg:
+            raise SeedError(msg, 503)
+
+    def _breaker_record(self, msg: str) -> None:
+        if self._breaker_suspended:
+            return
+        with self._fail_lock:
+            self._fail_until = time.monotonic() + BREAKER_COOLDOWN
+            self._fail_msg = msg
+
+    def _breaker_clear(self) -> None:
+        with self._fail_lock:
+            self._fail_until = 0.0
+            self._fail_msg = ""
+
+    # ---- HTTPError 分类（子类覆写；保持各自错误文案与状态码语义） ----
+    def _http_error(self, code: int, detail: str, reason) -> Exception:
+        raise NotImplementedError
+
+    # ---- 请求骨架 ----
+    def _transport_request(self, req: Request, *, timeout: int) -> tuple[int, bytes, dict]:
+        """共享请求骨架：熔断检查 + connect-refused 退避重试 + 错误分类 + 熔断记录。"""
+        self._breaker_check()
+        # 连接在建立前被拒（上游高压突发下偶发 RST/DNS 抖动）时，请求从未被上游处理，
+        # 退避后重试一次是安全的；超时不重试（可能已受理，避免 POST 重复执行）
+        for attempt in range(2):
+            try:
+                with self._opener.open(req, timeout=timeout) as resp:
+                    result = (resp.status, resp.read(MAX_RESPONSE), dict(resp.headers))
+                self._breaker_clear()
+                return result
+            except HTTPError as e:
+                self._breaker_clear()
+                body = b""
+                try:
+                    body = e.read(4096)
+                except Exception:
+                    pass
+                detail = body.decode("utf-8", "replace").strip()[:240]
+                raise self._http_error(e.code, detail, e.reason)
+            except (URLError, TimeoutError, OSError) as e:
+                reason = str(getattr(e, "reason", None) or e)
+                if attempt == 0 and is_connect_refused(e):
+                    time.sleep(0.5)
+                    continue
+                msg = f"无法连接 {self.service_name}：{reason}"
+                self._breaker_record(msg)
+                raise SeedError(msg, 503)

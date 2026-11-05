@@ -61,11 +61,6 @@ def cache_path(art_dir: Path, kind: str, tmdb_id: str, art: str = "poster") -> P
     return None
 
 
-def missing_art(art_dir: Path, kind: str, tmdb_id: str) -> set[str]:
-    """缓存里还缺哪些图（poster/backdrop/logo）。"""
-    return {a for a in ("poster", "backdrop", "logo") if cache_path(art_dir, kind, tmdb_id, a) is None}
-
-
 def cached_arts(art_dir: Path, kind: str, tmdb_id: str, art: str = "backdrop") -> list[Path]:
     """同 id 的全部缓存图（主图 + 序号扩展图 `-2`/`-3`…），顺序即展示顺序；无则空列表。"""
     if art not in ("poster", "backdrop", "logo"):

@@ -58,6 +58,3 @@ def discard(token: str) -> None:
         _STORE.pop(token, None)
 
 
-def cache_size() -> int:
-    with _LOCK:
-        return len(_STORE)

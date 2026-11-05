@@ -133,7 +133,14 @@ def _referenced(db) -> dict[str, set[str]]:
     avatars |= q("SELECT value FROM system_settings WHERE key = 'site_logo_path' AND value != ''")
     nav = q("SELECT logo_path FROM nav_links WHERE logo_path IS NOT NULL AND logo_path != ''")
     pl = q("SELECT cover_path FROM music_playlists WHERE cover_path IS NOT NULL AND cover_path != ''")
-    return {"ihub_avatars": avatars, "ihub_nav_logos": nav, "ihub_media/playlist_covers": pl}
+    # 曲目封面：music_tracks.cover_path 兜底（扫描侧删除失败/漏删的旧封面由每日清理回收）
+    covers = q("SELECT cover_path FROM music_tracks WHERE cover_path IS NOT NULL AND cover_path != ''")
+    return {
+        "ihub_avatars": avatars,
+        "ihub_nav_logos": nav,
+        "ihub_media/playlist_covers": pl,
+        "ihub_media/music_covers": covers,
+    }
 
 
 def run_janitor() -> dict:
@@ -255,7 +262,7 @@ def _run_janitor_locked(detail: dict) -> dict:
         "detail": detail,
     }
     try:
-        from app.models.system_setting import set_setting
+        from app.db.settings_repo import set_setting
 
         set_setting(LAST_RUN_KEY, json.dumps(result, ensure_ascii=False))
     except Exception:
@@ -290,7 +297,7 @@ def storage_overview() -> dict:
     last = None
     raw = ""
     try:
-        from app.models.system_setting import get_setting
+        from app.db.settings_repo import get_setting
 
         raw = get_setting(LAST_RUN_KEY, "")
         last = json.loads(raw) if raw else None

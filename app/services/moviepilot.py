@@ -10,32 +10,33 @@
 from __future__ import annotations
 
 import json
-import ssl
-import threading
-import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
-from urllib.request import HTTPSHandler, Request, build_opener
+from urllib.request import Request
 
 from app.services.seed_common import (
+    MAX_RESPONSE,
+    BreakerTransport,
     SeedAuthError,
     SeedError,
-    is_connect_refused,
     normalize_base_url,
+    mp_list,
     parse_json,
     unwrap_mp,
 )
 
+# 超时按端点响应速度分档（秒）：常规 API / 搜索与站点测试等慢操作 / 历史分页快读
 DEFAULT_TIMEOUT = 15
 SEARCH_TIMEOUT = 90
+LOGIN_TIMEOUT = 15
+SLOW_OP_TIMEOUT = 60      # MCP 调用等慢操作
+SITE_TEST_TIMEOUT = 90    # 站点连通性测试（API 站直连远端，慢）
+HISTORY_TIMEOUT = 5       # 历史分页快读
+WRITE_TIMEOUT = 30        # 写端点（订阅/站点/刷流任务等）
 # 推荐页单板块：上游是 MP 代拉的外部 API（TMDB/豆瓣/AniList），NAS 侧耗时波动大
 # （实测 5~30s 不等）。25s 是「有限时但少误伤」的折中——配合前端骨架屏，慢板块
 # 只是晚点亮；实测仍拉不到的（如 Bangumi 每日放送）由前端 lazy 标记整块隐藏
 RECOMMEND_TIMEOUT = 25
-# 连接失败熔断窗口：MP 不可达时 30s 内后续请求直接秒回同一错误，不再各自干等满超时
-# （否则 5s 一轮的概览轮询 × 15s 超时会占满线程池/DB 连接池，整个平台跟着卡）
-BREAKER_COOLDOWN = 30.0
-MAX_RESPONSE = 32 * 1024 * 1024
 
 _MEDIA_SOURCES = {"themoviedb", "douban", "bangumi", "imdb", "tvdb", "musicbrainz"}
 _SOURCE_ALIASES = {"tmdb": "themoviedb", "douban_music": "doubanmusic", "audio_db": "theaudiodb"}
@@ -219,7 +220,9 @@ def _context_subscription(context: dict) -> dict:
     return payload
 
 
-class MpClient:
+class MpClient(BreakerTransport):
+    service_name = "MoviePilot"
+
     def __init__(
         self,
         base_url: str,
@@ -230,6 +233,7 @@ class MpClient:
         auth_mode: str = "api_token",
         verify_tls: bool = True,
     ) -> None:
+        super().__init__()
         self.base_url = normalize_base_url(base_url)
         self.api_token = (api_token or "").strip()
         self.username = (username or "").strip()
@@ -237,41 +241,17 @@ class MpClient:
         self.auth_mode = auth_mode if auth_mode in ("api_token", "password") else "api_token"
         self.verify_tls = verify_tls
         self._jwt = ""
-        handlers = []
-        if self.base_url.lower().startswith("https://"):
-            ctx = ssl.create_default_context()
-            if not verify_tls:
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-            handlers.append(HTTPSHandler(context=ctx))
-        self._opener = build_opener(*handlers)
-        # 连接熔断状态：客户端实例与连接一一对应，保存连接重建时自然复位
-        self._fail_lock = threading.Lock()
-        self._fail_until = 0.0
-        self._fail_msg = ""
-        self._breaker_suspended = False
+        self._init_opener(verify_tls, handlers=[])
 
-    # ---- 连接熔断 ----
-    def _breaker_check(self) -> None:
-        if self._breaker_suspended:
-            return
-        with self._fail_lock:
-            active = time.monotonic() < self._fail_until
-            msg = self._fail_msg
-        if active and msg:
-            raise SeedError(msg, 503)
-
-    def _breaker_record(self, msg: str) -> None:
-        if self._breaker_suspended:
-            return
-        with self._fail_lock:
-            self._fail_until = time.monotonic() + BREAKER_COOLDOWN
-            self._fail_msg = msg
-
-    def _breaker_clear(self) -> None:
-        with self._fail_lock:
-            self._fail_until = 0.0
-            self._fail_msg = ""
+    # ---- HTTPError 分类 ----
+    def _http_error(self, code: int, detail: str, reason) -> Exception:
+        if code in (401, 403):
+            return SeedAuthError(
+                "MoviePilot 认证失败：请检查 API_TOKEN（或用户名/密码）是否有管理员权限"
+            )
+        if code == 404:
+            return SeedError("MoviePilot 未提供该接口", 404)
+        return SeedError(f"MoviePilot 返回 {code}：{detail or reason}", 502)
 
     # ---- 底层请求 ----
     def _headers(self, json_body: bool = False) -> dict:
@@ -315,38 +295,7 @@ class MpClient:
         else:
             headers = self._headers()
         req = Request(url, data=data, method=method, headers=headers)
-        self._breaker_check()
-        # 连接在建立前被拒（MP 高压突发下偶发 RST/DNS 抖动）时，请求从未被 MP 处理，
-        # 退避后重试一次是安全的；超时不重试（可能已受理，避免 POST 重复执行）
-        for attempt in range(2):
-            try:
-                with self._opener.open(req, timeout=timeout) as resp:
-                    result = (resp.status, resp.read(MAX_RESPONSE), dict(resp.headers))
-                self._breaker_clear()
-                return result
-            except HTTPError as e:
-                self._breaker_clear()
-                body = b""
-                try:
-                    body = e.read(4096)
-                except Exception:
-                    pass
-                detail = body.decode("utf-8", "replace").strip()[:240]
-                if e.code in (401, 403):
-                    raise SeedAuthError(
-                        "MoviePilot 认证失败：请检查 API_TOKEN（或用户名/密码）是否有管理员权限"
-                    )
-                if e.code == 404:
-                    raise SeedError("MoviePilot 未提供该接口", 404)
-                raise SeedError(f"MoviePilot 返回 {e.code}：{detail or e.reason}", 502)
-            except (URLError, TimeoutError, OSError) as e:
-                reason = str(getattr(e, "reason", None) or e)
-                if attempt == 0 and is_connect_refused(e):
-                    time.sleep(0.5)
-                    continue
-                msg = f"无法连接 MoviePilot：{reason}"
-                self._breaker_record(msg)
-                raise SeedError(msg, 503)
+        return self._transport_request(req, timeout=timeout)
 
     def _json(self, method: str, path: str, **kwargs):
         _, body, _ = self._request(method, path, **kwargs)
@@ -378,13 +327,13 @@ class MpClient:
             },
         )
         try:
-            with self._opener.open(req, timeout=15) as resp:
+            with self._opener.open(req, timeout=LOGIN_TIMEOUT) as resp:
                 body = resp.read(MAX_RESPONSE)
         except HTTPError:
             raise SeedAuthError("MoviePilot 登录失败，请检查用户名/密码") from None
         except (URLError, TimeoutError, OSError) as e:
             reason = str(getattr(e, "reason", None) or e)
-            msg = f"无法连接 MoviePilot：{reason}"
+            msg = f"无法连接 {self.service_name}：{reason}"
             self._breaker_record(msg)
             raise SeedError(msg, 503)
         self._breaker_clear()
@@ -449,7 +398,7 @@ class MpClient:
 
     # ---- MCP ----
     def mcp_tools(self) -> list:
-        value = self._api("GET", "/api/v1/mcp/tools", timeout=30)
+        value = self._api("GET", "/api/v1/mcp/tools", timeout=WRITE_TIMEOUT)
         data = unwrap_mp(value)
         return data if isinstance(data, list) else []
 
@@ -458,7 +407,7 @@ class MpClient:
             "POST",
             "/api/v1/mcp/tools/call",
             json_body={"tool_name": tool_name, "arguments": arguments or {}},
-            timeout=60,
+            timeout=SLOW_OP_TIMEOUT,
         )
         data = unwrap_mp(value)
         # MCP REST 返回 data.result（可能是 JSON 文本）
@@ -472,22 +421,6 @@ class MpClient:
             return result
         return data
 
-    def mcp_operation(
-        self,
-        operation_id: str,
-        *,
-        path_params: dict | None = None,
-        query: dict | None = None,
-        body: dict | None = None,
-    ):
-        args: dict = {"operation_id": operation_id}
-        if path_params:
-            args["path_params"] = path_params
-        if query:
-            args["query"] = query
-        if body is not None:
-            args["body"] = body
-        return self.mcp_call("moviepilot_api", args)
 
     # ---- 存储 ----
     def storage(self) -> dict:
@@ -511,19 +444,12 @@ class MpClient:
         value = self._api(
             "GET", "/api/v1/message/notification", params={"page": page, "count": count}
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            # 真实 MP 的下载历史同样是 data.list（可能没有 total）。
-            data = data.get("items") or data.get("list") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     # ---- 订阅/站点 ----
     def subscriptions(self, page: int = 1, count: int = 50) -> list:
         value = self._api("GET", "/api/v1/subscribe/", params={"page": page, "count": count})
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("list") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     def transfer_history(self, page: int = 1, count: int = 200) -> list:
         """整理历史（含 download_hash、状态、海报），用于转媒体完成确认/封面兜底。"""
@@ -531,14 +457,11 @@ class MpClient:
             "GET",
             "/api/v1/history/transfer",
             params={"page": page, "count": count},
-            timeout=5,
+            timeout=HISTORY_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            # MP v3 整理历史分页结构是 {"list": [...], "total": N}；
-            # 兼容旧版/插件可能返回的 items/data。
-            data = data.get("items") or data.get("list") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        # MP v3 整理历史分页结构是 {"list": [...], "total": N}；
+        # 兼容旧版/插件可能返回的 items/data。
+        return mp_list(value)
 
     def download_history(self, page: int = 1, count: int = 200) -> list:
         """下载历史（含 hash 与媒体海报），用于给 qB 任务补封面。"""
@@ -546,22 +469,15 @@ class MpClient:
             "GET",
             "/api/v1/history/download",
             params={"page": page, "count": count},
-            timeout=5,
+            timeout=HISTORY_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            # 真实 MP 的下载历史同样是 data.list（可能没有 total）。
-            data = data.get("items") or data.get("list") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        # 真实 MP 的下载历史同样是 data.list（可能没有 total）。
+        return mp_list(value)
 
     def sites(self) -> list:
         for path in ("/api/v1/site/agent", "/api/v1/site/"):
             try:
-                value = self._api("GET", path)
-                data = unwrap_mp(value)
-                if isinstance(data, dict):
-                    data = data.get("items") or data.get("data") or []
-                return data if isinstance(data, list) else []
+                return mp_list(self._api("GET", path))
             except SeedError as e:
                 if e.status_code == 404:
                     continue
@@ -569,11 +485,7 @@ class MpClient:
         return []
 
     def site_statistics(self) -> list:
-        value = self._api("GET", "/api/v1/site/statistic")
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(self._api("GET", "/api/v1/site/statistic"))
 
     def site_icon(self, site_id) -> str:
         """站点图标：MP 返回 {icon: "data:image/...;base64,..."}，直接内联给前端。
@@ -581,7 +493,7 @@ class MpClient:
         站点从未被访问过时 MP 可能 404，按无图标处理。"""
         try:
             value = self._api(
-                "GET", f"/api/v1/site/icon/{quote(str(site_id), safe='')}", timeout=15
+                "GET", f"/api/v1/site/icon/{quote(str(site_id), safe='')}", timeout=DEFAULT_TIMEOUT
             )
         except SeedError:
             return ""
@@ -596,7 +508,7 @@ class MpClient:
 
         结果必须实时（MP 侧也是现算），调用方不得缓存本结果。"""
         value = self._api(
-            "GET", f"/api/v1/site/test/{quote(str(site_id), safe='')}", timeout=90
+            "GET", f"/api/v1/site/test/{quote(str(site_id), safe='')}", timeout=SITE_TEST_TIMEOUT
         )
         # success/message 挂在响应信封上（data 恒为 null），不能走 unwrap_mp 拆包
         if isinstance(value, dict) and "success" in value:
@@ -633,10 +545,7 @@ class MpClient:
             params=params,
             json_body={"path": path or "/", "storage": "local", "type": "dir"},
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or []
-        return [x for x in (data or []) if isinstance(x, dict)]
+        return [x for x in mp_list(value) if isinstance(x, dict)]
 
     def dir_state(self, path: str) -> str:
         """目录在 MoviePilot 视角下的状态（与 qB 共用同一挂载时即为同一文件系统）。
@@ -683,12 +592,10 @@ class MpClient:
                     last_error = e
                     continue
                 raise
-            data = unwrap_mp(value)
-            if isinstance(data, dict):
-                data = data.get("items") or data.get("data") or []
+            data = mp_list(value)
             out: list[dict] = []
             seen: set[str] = set()
-            for item in data if isinstance(data, list) else []:
+            for item in data:
                 if not isinstance(item, dict):
                     continue
                 target = str(item.get("download_path") or item.get("save_path") or "").strip()
@@ -728,14 +635,14 @@ class MpClient:
         value = self._api(
             "GET",
             f"/api/v1/tmdb/{quote(str(tmdbid), safe='')}/{int(season)}",
-            timeout=30,
+            timeout=WRITE_TIMEOUT,
         )
         data = unwrap_mp(value)
         return data if isinstance(data, list) else []
 
     def subscribe_create(self, payload: dict) -> dict:
         """新增订阅（POST /api/v1/subscribe/，body 为 Subscribe schema；注意尾斜杠，否则 307）。"""
-        value = self._api("POST", "/api/v1/subscribe/", json_body=payload, timeout=30)
+        value = self._api("POST", "/api/v1/subscribe/", json_body=payload, timeout=WRITE_TIMEOUT)
         return unwrap_mp(value) if isinstance(value, dict) else {}
 
     def subscribe_delete_media(self, tmdbid: str | int, season: int | None = None) -> None:
@@ -747,7 +654,7 @@ class MpClient:
             "DELETE",
             f"/api/v1/subscribe/media/{quote(str(tmdbid), safe='')}",
             params=params,
-            timeout=15,
+            timeout=DEFAULT_TIMEOUT,
         )
 
     def media_detail(
@@ -818,10 +725,7 @@ class MpClient:
             params=params,
             timeout=timeout or SEARCH_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     def download_clients(self) -> list:
         """可用的下载器列表（MP /api/v1/download/clients）。"""
@@ -894,10 +798,7 @@ class MpClient:
             params={"source": source, "media_type": media_type, "page": page, "count": count},
             timeout=SEARCH_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     def discover(self, source: str, *, page: int = 1, count: int = 30, **extra) -> list:
         allowed = {
@@ -942,10 +843,7 @@ class MpClient:
             params=clean,
             timeout=SEARCH_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or data.get("list") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     def recommend_section(self, source: str, *, page: int = 1, count: int = 20) -> list:
         """推荐页的单个板块（source 为 MP 前端的 apipath，如 recommend/tmdb_trending）。"""
@@ -957,23 +855,84 @@ class MpClient:
             params={"page": page, "count": count},
             timeout=RECOMMEND_TIMEOUT,
         )
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or data.get("list") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     # ---- 插件/刷流 ----
     def plugins(self) -> list:
         value = self._api("GET", "/api/v1/plugin/", params={"state": "installed"})
-        data = unwrap_mp(value)
-        if isinstance(data, dict):
-            data = data.get("items") or data.get("data") or []
-        return data if isinstance(data, list) else []
+        return mp_list(value)
 
     def brush_status(self) -> dict:
         value = self._api("GET", "/api/v1/plugin/BrushFlow/status")
         data = unwrap_mp(value)
         return data if isinstance(data, dict) else {}
+
+    # ---- BrushFlow 任务编辑（/api/v1/plugin/BrushFlow 代理，字段与 MP BrushTaskPayload 一致） ----
+    def brush_task_detail(self, task_id: str) -> dict:
+        value = self._api(
+            "GET",
+            f"/api/v1/plugin/BrushFlow/tasks/{quote(str(task_id), safe='')}",
+        )
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def brush_task_create(self, payload: dict) -> dict:
+        value = self._api("POST", "/api/v1/plugin/BrushFlow/tasks", json_body=payload, timeout=WRITE_TIMEOUT)
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def brush_task_update(self, task_id: str, payload: dict) -> dict:
+        value = self._api(
+            "PUT",
+            f"/api/v1/plugin/BrushFlow/tasks/{quote(str(task_id), safe='')}",
+            json_body=payload,
+            timeout=WRITE_TIMEOUT,
+        )
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def brush_task_delete(self, task_id: str) -> None:
+        self._api("DELETE", f"/api/v1/plugin/BrushFlow/tasks/{quote(str(task_id), safe='')}", timeout=WRITE_TIMEOUT)
+
+    def brush_task_set_state(self, task_id: str, enabled: bool) -> dict:
+        value = self._api(
+            "POST",
+            f"/api/v1/plugin/BrushFlow/tasks/{quote(str(task_id), safe='')}/state",
+            json_body={"enabled": bool(enabled)},
+            timeout=WRITE_TIMEOUT,
+        )
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def brush_task_run(self, task_id: str, kind: str) -> dict:
+        """kind: run（立即刷流）/ check（立即检查）/ clear（清除任务数据）。"""
+        path = {"run": "run", "check": "check", "clear": "clear"}.get(kind)
+        if not path:
+            raise SeedError("未知的刷流任务操作", 400)
+        value = self._api(
+            "POST",
+            f"/api/v1/plugin/BrushFlow/tasks/{quote(str(task_id), safe='')}/{path}",
+            timeout=WRITE_TIMEOUT,
+        )
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    # ---- MP 站点管理（/api/v1/site，字段与 MP Site schema 一致） ----
+    def site_detail(self, site_id: int) -> dict:
+        value = self._api("GET", f"/api/v1/site/{quote(str(site_id), safe='')}", timeout=DEFAULT_TIMEOUT)
+        data = unwrap_mp(value)
+        return data if isinstance(data, dict) else {}
+
+    def site_create(self, payload: dict) -> dict:
+        value = self._api("POST", "/api/v1/site/", json_body=payload, timeout=WRITE_TIMEOUT)
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def site_update(self, payload: dict) -> dict:
+        value = self._api("PUT", "/api/v1/site/", json_body=payload, timeout=WRITE_TIMEOUT)
+        return unwrap_mp(value) if isinstance(unwrap_mp(value), dict) else {}
+
+    def site_delete(self, site_id: int) -> None:
+        self._api("DELETE", f"/api/v1/site/{quote(str(site_id), safe='')}", timeout=WRITE_TIMEOUT)
+
+    def site_options(self) -> dict:
+        """站点编辑辅助数据：下载器列表（MP download/clients）。"""
+        clients = self.download_clients()
+        return {"downloaders": [{"name": str(c.get("name") or "")} for c in clients if isinstance(c, dict)]}
 
     def brush_task(self, task_id: str) -> dict:
         value = self._api(

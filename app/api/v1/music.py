@@ -8,11 +8,11 @@
   流式转发分块透传并透传 Range，默认原文件直出（不做强制转码）
 - 用户数据（收藏/播放统计）存 user_music_stats，按用户+音源隔离；
   Subsonic 源的 star/scrobble 双写上游（尽力而为，失败不影响本地记录）
+- 标签解析与封面提取在 services/music_tags.py（本文件只保留路由与请求处理）
 - 出站 HTTP / NAS 扫描状态机均复用 app.services 下的共享实现
 """
 
 import hashlib
-import io
 import json as jsonlib
 import logging
 import re
@@ -40,29 +40,22 @@ from app.db.session import get_db
 from app.models.music_track import MusicTrack
 from app.models.music_user_stat import MusicUserStat
 from app.models.music_playlist import MusicPlaylist, MusicPlaylistItem
-from app.models.system_setting import set_setting
+from app.db.settings_repo import set_setting
 from app.models.user import User
 from app.schemas.common import ConnectionTestIn, pick
 from app.services import media_scan
+from app.services.music_tags import _read_tags
 from app.services.settings_store import get_cfg, get_cfgs, get_credential, set_credential
+from app.core.errors import UpstreamError
 from app.services.upstream_http import http as _http
 from app.services.upstream_http import http_open as _http_open
 from app.services.upstream_http import proxy_stream as _proxy_stream
 from app.core import data_dirs
 
-try:
-    import mutagen
-except ImportError:  # pragma: no cover
-    mutagen = None
-
 router = APIRouter(prefix="/music", tags=["music"])
 
 AUDIO_EXTS = {".mp3", ".flac", ".wav", ".m4a", ".ogg", ".opus", ".wma", ".ape"}
 SCAN_STATE_KEY = "music_scan_state"
-
-# 图片解码上限：4000 万像素（约 8000x5000）。服务端 Image.load() 是全量解码，
-# 不设上限时一张几百 KB 的 PNG 可膨胀到数百 MB 内存（解压炸弹，认证后 DoS）
-_MAX_COVER_PIXELS = 40_000_000
 
 logger = logging.getLogger(__name__)
 
@@ -333,9 +326,9 @@ def subsonic_lyrics(song_id: str, user: User = Depends(get_current_user), db: Se
     try:
         try:
             wrapper = _sub_get(db, "getLyricsBySongId", {"id": song_id})
-        except HTTPException:
+        except (HTTPException, UpstreamError):
             wrapper = _sub_get(db, "getLyrics", {"id": song_id})
-    except HTTPException:
+    except (HTTPException, UpstreamError):
         return {"synced": False, "lines": []}
     lines_out: list[dict] = []
     synced = False
@@ -363,7 +356,7 @@ def subsonic_test(body: ConnectionTestIn, admin: User = Depends(get_current_admi
     try:
         wrapper = _sub_request(url, user, pwd, "ping")
         return {"ok": wrapper.get("status") == "ok", "server": wrapper.get("serverVersion", "")}
-    except HTTPException as e:
+    except (HTTPException, UpstreamError) as e:
         return {"ok": False, "error": e.detail}
 
 
@@ -395,134 +388,6 @@ def _nas_root(db: Session) -> Path:
     return path
 
 
-def _cover_dir() -> Path:
-    d = Path(cfg.DATA_DIR) / data_dirs.MUSIC_COVERS
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _extract_cover(mf, rel: str) -> str:
-    """提取内嵌封面到 data/music_covers/<hash>.<ext>，返回相对路径；无封面返回空。
-    哈希取自相对路径：同一路径重复扫描时复用/覆盖，不产生垃圾文件。"""
-    data = b""
-    try:
-        if hasattr(mf, "pictures") and mf.pictures:  # FLAC / APEv2
-            data = mf.pictures[0].data or b""
-        if not data and mf.tags:
-            tags = mf.tags
-            try:
-                covr = tags["covr"]  # MP4/M4A（键查找大小写不敏感，dict.get 不可用）
-                data = bytes(covr[0])
-            except (KeyError, ValueError, IndexError, TypeError):
-                # ID3（MP3）：APIC 的描述非空时 dict 键是 "APIC:<desc>"（iTunes 等工具常写
-                # desc="cover"），tags["APIC"] / tags["APIC:"] 都取不到——用 getall 全取，
-                # 多帧时优先 type=3（正面前封面）
-                try:
-                    pics = tags.getall("APIC")
-                except Exception:
-                    pics = []
-                if pics:
-                    front = next((p for p in pics if getattr(p, "type", 0) == 3), pics[0])
-                    data = front.data or b""
-    except Exception:
-        return ""
-    if len(data) < 64:
-        return ""
-    from PIL import Image  # 可选依赖：延迟导入，扫描时才需要
-
-    name = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:24]
-    ext = ".png" if data[:8] == b"\x89PNG\r\n\x1a\n" else ".jpg"
-    target = _cover_dir() / f"{name}{ext}"
-    # 压到 300px 方边内，避免几 MB 的原封面拖累列表加载
-    try:
-        with Image.open(io.BytesIO(data)) as im:
-            if im.width * im.height > _MAX_COVER_PIXELS:
-                return ""  # 异常超大封面（解压炸弹形态）：跳过，不影响曲目入库
-            im = im.convert("RGB") if ext == ".jpg" else im
-            im.thumbnail((300, 300))
-            im.save(target, quality=85)
-    except Exception:
-        return ""
-    return f"music_covers/{target.name}"
-
-
-_YEAR_RE = re.compile(r"(\d{4})")
-
-
-def _read_tags(path: Path, rel: str) -> dict:
-    title, artist, album, duration = "", "", "", 0.0
-    album_artist = genre = ""
-    year = track_no = disc_no = bitrate = sample_rate = 0
-    cover_path = None
-    note = ""
-    if mutagen is not None:
-        try:
-            mf = mutagen.File(str(path))
-            if mf is not None:
-                duration = float(getattr(mf.info, "length", 0) or 0)
-                bitrate = int(getattr(mf.info, "bitrate", 0) or 0) // 1000
-                sample_rate = int(getattr(mf.info, "sample_rate", 0) or 0)
-                tags = mf.tags or {}
-
-                def first(*keys):
-                    """按序取第一个非空标签。注意必须走 tags[k]（dict.get 匹配不到）；
-                    mutagen 各容器对缺失键抛的异常不一（VComment 抛 ValueError，
-                    ID3/MP4 抛 KeyError），两样都要接住。"""
-                    for k in keys:
-                        try:
-                            v = tags[k]
-                        except (KeyError, ValueError):
-                            continue
-                        if v:
-                            return str(v[0] if isinstance(v, list) else v)
-                    return ""
-
-                def first_int(*keys):
-                    raw = first(*keys)
-                    m = re.search(r"\d+", raw)
-                    return int(m.group()) if m else 0
-
-                title = first("TIT2", "©nam", "TITLE")
-                artist = first("TPE1", "©ART", "ARTIST")
-                album = first("TALB", "©alb", "ALBUM")
-                album_artist = first("TPE2", "aART", "ALBUMARTIST", "ALBUM ARTIST")
-                genre = first("TCON", "©gen", "©gne", "GENRE")[:128]
-                ym = _YEAR_RE.search(first("TDRC", "TDRL", "TDOR", "TYER", "©day", "DATE"))
-                year = int(ym.group(1)) if ym else 0
-                track_no = first_int("TRCK", "trkn", "TRACKNUMBER")
-                disc_no = first_int("TPOS", "disk", "DISCNUMBER")
-                cover_path = _extract_cover(mf, rel) or None
-        except Exception as e:
-            note = f"标签读取失败：{e}"
-    stem = path.stem
-    if not title:
-        title = stem
-        note = note or "无标题标签，按文件名识别"
-    if not artist:
-        artist = "未知歌手"
-    if not album:
-        album = "未知专辑"
-    return {
-        "path": rel,
-        "title": title[:512],
-        "artist": artist[:512],
-        "album": album[:512],
-        "album_artist": album_artist[:512],
-        "genre": genre,
-        "year": year,
-        "track_no": track_no,
-        "disc_no": disc_no,
-        "duration": duration,
-        "bitrate": bitrate,
-        "sample_rate": sample_rate,
-        "ext": path.suffix.lower()[:16],
-        "size": path.stat().st_size,
-        "mtime": int(path.stat().st_mtime),
-        "cover_path": cover_path,
-        "note": note[:512],
-    }
-
-
 # ---- 后台增量扫描（mtime 未变的文件直接跳过标签解析；共享引擎 app.services.media_scan） ----
 
 _SCAN = media_scan.ScanStateStore(SCAN_STATE_KEY)
@@ -532,18 +397,27 @@ _SCAN = media_scan.ScanStateStore(SCAN_STATE_KEY)
 SCANNER_VERSION = 2
 
 
+def _delete_cover_file(rel: str) -> None:
+    """删除封面文件：必须走 resolve_rel（v1 旧前缀会翻译到 ihub_media/ 下）。
+    直接 (data / rel) 拼接会在 v2 目录迁移后指到不存在的旧路径，
+    missing_ok=True 静默吞掉，旧封面文件从此滞留磁盘（2026-11-04 修）。"""
+    target = data_dirs.resolve_rel(rel)
+    if target is not None:
+        target.unlink(missing_ok=True)
+
+
 def _apply_track_meta(row: MusicTrack, meta: dict, data: Path) -> None:
     """把新解析结果写入已有行，并回收被替换掉的旧封面文件。"""
     old_cover = row.cover_path
     for k, v in meta.items():
         setattr(row, k, v)
     if old_cover and old_cover != row.cover_path:
-        (data / old_cover).unlink(missing_ok=True)
+        _delete_cover_file(old_cover)
 
 
 def _drop_track_cover(row: MusicTrack, data: Path) -> None:
     if row.cover_path:
-        (data / row.cover_path).unlink(missing_ok=True)
+        _delete_cover_file(row.cover_path)
 
 
 def _run_scan(root_str: str, data_dir: str) -> None:
@@ -975,7 +849,7 @@ def music_summary(user: User = Depends(get_current_user), db: Session = Depends(
     elif source == "subsonic":
         try:
             songs = _sub_all_songs(db)
-        except HTTPException:
+        except (HTTPException, UpstreamError):
             return out
         out["songs"] = len(songs)
         out["albums"] = len({
@@ -1066,12 +940,12 @@ def _sub_dual_write(db: Session, endpoint: str, song_id: str) -> str:
     """Subsonic 上游双写（star/unstar/scrobble），尽力而为：失败只回报不影响本地。"""
     try:
         url, user, pwd = _sub_creds(db)
-    except HTTPException:
+    except (HTTPException, UpstreamError):
         return ""  # 源未配置（可能已切换），跳过
     try:
         _sub_request(url, user, pwd, endpoint, {"id": song_id})
         return ""
-    except HTTPException as e:
+    except (HTTPException, UpstreamError) as e:
         return f"上游同步失败：{e.detail}"
 
 
@@ -1350,6 +1224,9 @@ def _process_playlist_cover(data: bytes, ext: str, pid: int) -> str:
     不能在事件循环里跑）。返回落盘的相对路径。"""
     from PIL import Image
 
+    # 图片解码上限：4000 万像素（约 8000x5000）。服务端 Image.load() 是全量解码，
+    # 不设上限时一张几百 KB 的 PNG 可膨胀到数百 MB 内存（解压炸弹，认证后 DoS）
+    _MAX_COVER_PIXELS = 40_000_000
     try:
         im = Image.open(io.BytesIO(data))
         # 解压炸弹防护：Image.open 只读头部，先核对声明尺寸再解码（load/thumbnail 才真正吃内存）

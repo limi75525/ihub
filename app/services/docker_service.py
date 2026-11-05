@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOCKET_PATH = "/var/run/docker.sock"
 
 # 镜像拉取可能很慢（大镜像 + 家宽），给足超时；nginx 反代的读超时可能更短，超长拉取会断流报错
+# 超时按响应速度分四档（秒）：轻探测 / 常规读 / 慢聚合 / 写操作
+_T_PING = 4.0     # /_ping、/version 探测
+_T_READ = 8.0     # 单容器详情、stats 等常规读
+_T_SLOW = 30.0    # system/df 全量统计
+_T_WRITE = 60.0   # 容器启停/删除等写操作
 _PULL_TIMEOUT = 600.0
 
 # 容器列表短缓存：4 秒内的重复请求直接复用（页面轮询/手动刷新叠加时避免反复全量采样）
@@ -73,7 +78,7 @@ def _connect(timeout: float) -> http.client.HTTPConnection:
     return http.client.HTTPConnection(parsed.hostname, parsed.port or 2375, timeout=timeout)
 
 
-def _request(method: str, path: str, timeout: float = 8.0):
+def _request(method: str, path: str, timeout: float = _T_READ):
     """请求 Docker API 并解析 JSON；非 2xx 抛 DockerUnavailable。"""
     conn = _connect(timeout)
     try:
@@ -95,7 +100,7 @@ def _request(method: str, path: str, timeout: float = 8.0):
         conn.close()
 
 
-def _request_bytes(method: str, path: str, timeout: float = 15.0, max_bytes: int = 2_000_000) -> bytes:
+def _request_bytes(method: str, path: str, timeout: float = _T_READ, max_bytes: int = 2_000_000) -> bytes:
     conn = _connect(timeout)
     try:
         conn.request(method, path)
@@ -117,7 +122,7 @@ def available() -> tuple[bool, str]:
         return False, f"未找到 Docker Socket（{host.removeprefix('unix://')}）"
     try:
         # /_ping 返回纯文本 "OK"，不能用 _request（JSON 解析会失败）
-        _request_bytes("GET", "/_ping", timeout=4.0)
+        _request_bytes("GET", "/_ping", timeout=_T_PING)
         return True, ""
     except DockerUnavailable as exc:
         return False, str(exc)
@@ -125,7 +130,7 @@ def available() -> tuple[bool, str]:
 
 def version_info() -> dict:
     try:
-        info = _request("GET", "/version", timeout=5.0)
+        info = _request("GET", "/version", timeout=_T_PING)
     except DockerUnavailable:
         return {}
     return {
@@ -158,7 +163,7 @@ def _fmt_ports(ports: list) -> list[str]:
 def _fill_stats(item: dict, cid: str) -> None:
     """补 CPU% / 内存占用（单次采样自带 precpu，可直接算差值；失败静默跳过）。"""
     try:
-        st = _request("GET", f"/containers/{cid}/stats?stream=false", timeout=6.0)
+        st = _request("GET", f"/containers/{cid}/stats?stream=false", timeout=_T_READ)
     except (DockerUnavailable, OSError, ValueError):
         return
     if not isinstance(st, dict):
@@ -206,7 +211,7 @@ def count_containers() -> int:
     /stats 首页聚合专用——总览用户卡只需个数，逐容器采样（每台约 1-2s）会把
     仪表盘接口拖慢到秒级。
     """
-    rows = _request("GET", "/containers/json?all=1", timeout=6.0)
+    rows = _request("GET", "/containers/json?all=1", timeout=_T_READ)
     if not isinstance(rows, list):
         raise DockerUnavailable("Docker API 响应格式异常")
     return len(rows)
@@ -220,7 +225,7 @@ def list_containers() -> list[dict]:
         if cached_items is not None and now - cached_ts < _LIST_CACHE_TTL:
             return cached_items
 
-    rows = _request("GET", "/containers/json?all=1", timeout=10.0)
+    rows = _request("GET", "/containers/json?all=1", timeout=_T_READ)
     if not isinstance(rows, list):
         raise DockerUnavailable("Docker API 响应格式异常")
     items: list[dict] = []
@@ -253,10 +258,22 @@ def list_containers() -> list[dict]:
 
     # stats 接口每次采样约阻塞 1s：并发抓取把总耗时从 N 秒压到约 1 秒
     if running:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(running))) as pool:
-            futures = [pool.submit(_fill_stats, item, cid) for item, cid in running]
-            for f in futures:
-                f.result()
+        with _NET_LOCK:
+            batch_started = now
+            batch_before = set(_NET_PREV.keys())
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(running))) as pool:
+                futures = [pool.submit(_fill_stats, item, cid) for item, cid in running]
+                for f in futures:
+                    f.result()
+        finally:
+            # 剔除已删除容器的网速采样残留：本轮开始时存在、且整轮都没被 _fill_stats
+            # 刷新（时间戳早于本轮开始）的 cid 已不在容器列表里
+            with _NET_LOCK:
+                for cid in batch_before:
+                    entry = _NET_PREV.get(cid)
+                    if entry is not None and entry[0] < batch_started:
+                        _NET_PREV.pop(cid, None)
 
     items.sort(key=lambda x: (x["state"] != "running", x["name"]))
     with _LIST_CACHE_LOCK:
@@ -295,10 +312,10 @@ def _strip_ansi(text: str) -> str:
 
 def container_logs(cid: str, tail: int = 300) -> dict:
     tail = max(1, min(int(tail), 1000))
-    info = _request("GET", f"/containers/{cid}/json", timeout=8.0)
+    info = _request("GET", f"/containers/{cid}/json", timeout=_T_READ)
     tty = bool((info.get("Config") or {}).get("Tty"))
     raw = _request_bytes(
-        "GET", f"/containers/{cid}/logs?stdout=1&stderr=1&tail={tail}", timeout=15.0
+        "GET", f"/containers/{cid}/logs?stdout=1&stderr=1&tail={tail}", timeout=_T_READ,
     )
     text = raw.decode("utf-8", "replace") if tty else _demux_logs(raw)
     text = _strip_ansi(text)
@@ -313,7 +330,7 @@ def container_logs(cid: str, tail: int = 300) -> dict:
 
 
 def system_df() -> dict:
-    data = _request("GET", "/system/df", timeout=30.0)
+    data = _request("GET", "/system/df", timeout=_T_SLOW)
 
     def _sum(entries, size_key="Size") -> dict:
         total = 0
@@ -341,6 +358,7 @@ def system_df() -> dict:
 _stop = threading.Event()
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()  # 并发切换开关/与启动流程并发时防止双线程
+_EVENT_IDLE_TIMEOUT = 90.0  # 事件流空闲读超时：事件稀疏时连接长时间空闲，超时后重连
 _gen = 0  # 事件线程代际：关闭后 90s 内重开时，旧线程的残留事件不再投递
 _retry_thread: threading.Thread | None = None
 
@@ -351,7 +369,7 @@ def stream_events(stop: threading.Event, on_event) -> None:
     while not stop.is_set():
         try:
             # 读超时给足：事件稀疏时连接会长时间空闲；超时后走重连，不影响正确性
-            conn = _connect(timeout=90.0)
+            conn = _connect(timeout=_EVENT_IDLE_TIMEOUT)
             try:
                 conn.request("GET", path)
                 resp = conn.getresponse()
@@ -455,7 +473,7 @@ def _schedule_retry(broker) -> None:
                 return  # 已被其他路径启动
             # 开关可能已被关闭：关闭状态下不再触碰 Docker，由下一次手动开启接管
             from app.db.session import SessionLocal
-            from app.models.system_setting import get_setting_db
+            from app.db.settings_repo import get_setting_db
 
             db = SessionLocal()
             try:
@@ -498,7 +516,7 @@ class DockerError(Exception):
         self.message = message
 
 
-def _write_request(method: str, path: str, timeout: float = 60.0, max_bytes: int = 2_000_000) -> tuple[int, bytes]:
+def _write_request(method: str, path: str, timeout: float = _T_WRITE, max_bytes: int = 2_000_000) -> tuple[int, bytes]:
     """写请求：返回 (状态码, 响应体)。状态码交给调用方映射（写接口多为 204 空响应）。"""
     conn = _connect(timeout)
     try:
@@ -535,7 +553,7 @@ def container_action(cid: str, action: str, timeout_s: int | None = None) -> dic
     if timeout_s is not None and action in ("stop", "restart"):
         path += f"?t={int(timeout_s)}"
     # stop/restart 的 t 是给容器的优雅退出时间，本地等待要更宽
-    status, body = _write_request("POST", path, timeout=max(60.0, (timeout_s or 0) + 30.0))
+    status, body = _write_request("POST", path, timeout=max(_T_WRITE, (timeout_s or 0) + 30.0))
     if status in (200, 204):
         return {"ok": True, "message": _ACTION_LABEL[action]}
     err = _map_write_error(status, body)
@@ -546,7 +564,7 @@ def container_action(cid: str, action: str, timeout_s: int | None = None) -> dic
 
 def remove_container(cid: str) -> dict:
     """删除容器本体：不带 v=1（绝不连带删卷），运行中的容器由 Docker 返回 409。"""
-    status, body = _write_request("DELETE", f"/containers/{cid}?v=0", timeout=60.0)
+    status, body = _write_request("DELETE", f"/containers/{cid}?v=0", timeout=_T_WRITE)
     if status in (200, 204):
         return {"ok": True, "message": "容器已删除"}
     raise _map_write_error(status, body)

@@ -87,19 +87,6 @@ def notify_admins(db: Session, *, type: str, title: str, body: str = "", link: s
     return create(db, user_ids=admin_ids(db), type=type, title=title, body=body, link=link, dedup_key=dedup_key)
 
 
-def service_failed(db: Session, scope: str, error: str) -> int:
-    """后台服务运行失败通知：按 天 + scope 去重，避免反复失败刷屏。"""
-    from datetime import datetime, timezone
-
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return notify_admins(
-        db,
-        type="service_failed",
-        title="后台服务运行失败",
-        body=f"{scope} 运行失败：{error[:400]}",
-        dedup_key=f"service:{scope}:{day}",
-    )
-
 
 def unread_count(db: Session, user_id: int) -> int:
     return (

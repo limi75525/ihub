@@ -16,7 +16,7 @@ from app.db.session import get_db
 from app.models.message import Message
 from app.models.source import Source
 from app.models.device import Device
-from app.models.system_setting import get_setting_db
+from app.db.settings_repo import get_setting_db
 from app.models.user import User
 from app.scheduler import sync_email_jobs
 from app.schemas.message import MessageOut
@@ -171,7 +171,7 @@ def create_source(
     if body.type == "api":
         import secrets as _secrets
 
-        from app.api.v1.devices import _device_out, _encrypt_secret, gen_device_code
+        from app.services.device_service import device_out as _device_out, encrypt_secret as _encrypt_secret, gen_device_code
 
         secret = _secrets.token_urlsafe(32)
         device = Device(
@@ -238,6 +238,9 @@ def update_source(
             if value:
                 source.email_password = encrypt_text(value)
             continue
+        if field == "folder":
+            # 收件文件夹固定 INBOX，不接受修改：填错文件夹会直接收不到邮件（2026-11-04）
+            continue
         setattr(source, field, value)
     # 消息类型变化（sms↔api）时同步绑定设备的 kind
     if source.type in ("sms", "api") and source.type != old_type:
@@ -262,7 +265,7 @@ def delete_source(
 ):
     from datetime import datetime, timezone
 
-    from app.api.v1.recycle import recycle_enabled
+    from app.services.recycle_service import recycle_enabled
     from app.models.device import Device
     from app.services.ingest_service import delete_attachments
 
@@ -505,7 +508,7 @@ def source_messages(
 
 
 def _message_out(m: Message, source_name: str, source_logo: str | None) -> dict:
-    from app.api.v1.messages import _message_out as _serialize
+    from app.services.message_out import message_out as _serialize
 
     return _serialize(m, source_name, source_logo)
 

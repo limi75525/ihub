@@ -7,11 +7,11 @@
 
 from collections.abc import Sequence
 
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.crypto import decrypt_text, encrypt_text
-from app.models.system_setting import SystemSetting, get_setting_db, set_setting
+from app.models.system_setting import SystemSetting
+from app.db.settings_repo import get_setting_db, set_setting
 
 
 def get_cfg(db: Session, key: str, default: str = "") -> str:
@@ -44,7 +44,3 @@ def get_credential(db: Session, key: str) -> str:
 def set_credential(key: str, plain: str) -> None:
     set_setting(key, encrypt_text(plain) if plain else "")
 
-
-def require_configured(ok: bool, message: str) -> None:
-    if not ok:
-        raise HTTPException(400, message)

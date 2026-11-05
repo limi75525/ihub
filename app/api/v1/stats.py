@@ -113,7 +113,7 @@ def dashboard(
         .all()
     )
     names = {s.id: s.name for s in sources}
-    from app.api.v1.messages import _avatar_logo, _logo_rules, _match_logo
+    from app.services.logo_match import avatar_logo as _avatar_logo, logo_rules as _logo_rules, match_logo as _match_logo
 
     # 头像库为企业分组双表模型：_logo_rules 返回 (规则列表, 分组映射)
     logo_rules, logo_groups = _logo_rules(db, user.id)

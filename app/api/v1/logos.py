@@ -23,10 +23,10 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.v1.auth import sanitize_svg
+from app.services.uploads import sanitize_svg
 from app.core.deps import get_current_user, get_media_user
 from app.core.netutil import safe_logo_url
-from app.models.system_setting import get_setting
+from app.db.settings_repo import get_setting
 from app.models.transfer_item import TransferItem
 from app.core.timeutil import as_utc
 from app.db.session import get_db
@@ -65,7 +65,7 @@ MANIFEST_NAME = "manifest.json"
 
 def avatar_max_size() -> int:
     """头像本地上传大小上限（字节），可在 设置 → 系统 → 附件上传限制 配置。"""
-    from app.models.system_setting import get_int_setting
+    from app.db.settings_repo import get_int_setting
 
     return get_int_setting("avatar_max_mb", 2, AVATAR_MIN_MB, AVATAR_MAX_MB) * 1024 * 1024
 
@@ -325,7 +325,7 @@ def delete_group(group_id: int, user: User = Depends(get_current_user), db: Sess
     """删除企业分组：软删分组并级联软删全部成员规则（回收站按分组整体恢复）。"""
     from datetime import datetime, timezone
 
-    from app.api.v1.recycle import recycle_enabled
+    from app.services.recycle_service import recycle_enabled
 
     g = _own_group(db, user, group_id)
     now = datetime.now(timezone.utc)
@@ -450,7 +450,7 @@ def update_rule(
 def delete_rule(rule_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from datetime import datetime, timezone
 
-    from app.api.v1.recycle import recycle_enabled
+    from app.services.recycle_service import recycle_enabled
 
     r = _own_rule(db, user, rule_id)
     if recycle_enabled():
@@ -494,29 +494,7 @@ def _attach_library_file(db, obj, user: User, file_id: int) -> None:
     obj.logo_url = None
 
 
-def _assert_public_http_url(url: str) -> None:
-    """在线头像缓存是普通用户可触发的出站请求，必须拦内网（SSRF）：
-    仅允许 http(s)；域名解析出的所有 IP 都不得是私网/环回/链路本地/保留段
-    （169.254.169.254 云元数据、127.0.0.1、192.168.* 等一律拒绝）。
-    内网判定与接入服务/邮箱等入口共用 core.netutil.host_resolves_private。"""
-    from urllib.parse import urlsplit
-
-    from app.core.netutil import host_resolves_private
-
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError("仅支持 http(s) 地址")
-    if host_resolves_private(parts.hostname):
-        raise ValueError("地址解析到内网/保留 IP，已拒绝")
-
-
-class _SSRFCheckedRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """urlopen 默认静默跟随重定向——跳转后的地址绕过上面的内网校验。
-    重定向的每一跳都重新校验，不合规直接失败。"""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _assert_public_http_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+# 在线头像缓存的 SSRF 校验/重定向处理/带上限读取统一在 core.netutil.safe_fetch。
 
 
 def _cache_remote_logo(model_cls, obj_id: int, url: str) -> None:
@@ -527,18 +505,9 @@ def _cache_remote_logo(model_cls, obj_id: int, url: str) -> None:
     if not url.strip().lower().startswith(("http://", "https://")):
         return
     try:
-        from urllib.request import Request, build_opener
+        from app.core.netutil import safe_fetch
 
-        _assert_public_http_url(url)
-        opener = build_opener(_SSRFCheckedRedirectHandler)
-        req = Request(url, headers={"User-Agent": "iHub"})
-        with opener.open(req, timeout=15) as resp:
-            # 跟随重定向后的最终地址再核验一次（防 DNS/跳转组合绕过）
-            _assert_public_http_url(resp.geturl())
-            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-            data = resp.read(2 * 1024 * 1024 + 1)
-        if len(data) > 2 * 1024 * 1024:
-            return
+        _, ctype, data = safe_fetch(url, timeout=15, max_bytes=2 * 1024 * 1024)
         ext = {
             "image/png": ".png",
             "image/jpeg": ".jpg",
@@ -681,7 +650,7 @@ def _serve_logo_file(obj):
     path = data_dirs.resolve_rel(obj.logo_path)
     if not path or not path.is_file():
         raise HTTPException(404, "Logo 文件缺失")
-    from app.api.v1.auth import media_file_headers
+    from app.services.uploads import media_file_headers
 
     return FileResponse(path, headers=media_file_headers(path))
 

@@ -31,6 +31,8 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.services import device_service
+from app.services.device_service import gen_device_code  # noqa: F401 (re-export for sources)
 from app.core.crypto import decrypt_text, encrypt_text
 from app.core.deps import get_current_user
 from app.core.netutil import client_ip
@@ -64,31 +66,12 @@ _SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
 
-def gen_device_code(db: Session) -> str:
-    for _ in range(50):
-        code = "".join(secrets.choice(CODE_CHARS) for _ in range(8))
-        if db.get(Device, code) is None:
-            return code
-    raise HTTPException(500, "设备码生成失败，请重试")
-
-
-def _encrypt_secret(secret: str) -> str:
-    return encrypt_text(secret)
-
-
 def _decrypt_secret(device: Device) -> str | None:
     return decrypt_text(device.device_secret_cipher)
 
 
 def _sign_string(device_code: str, ts: int, nonce: str, body_sha: str) -> str:
     return f"{device_code}\n{ts}\n{nonce}\n{body_sha}"
-
-
-def _device_out(d: Device) -> DeviceOut:
-    out = DeviceOut.model_validate(d)
-    out.created_at = d.created_at
-    out.last_seen_at = d.last_seen_at
-    return out
 
 
 def _get_own_device(db: Session, user: User, code: str) -> Device:
@@ -192,7 +175,7 @@ def register_device(
         # 注意：此处不能新建来源（孤儿来源正是重复卡片问题的根源）；
         # 指定 source_id 时把设备重绑到该来源，未指定则沿用原绑定。
         secret = secrets.token_urlsafe(32)
-        dup.device_secret_cipher = _encrypt_secret(secret)
+        dup.device_secret_cipher = device_service.encrypt_secret(secret)
         dup.app_version = body.app_version
         dup.is_active = True
         if source is not None:
@@ -203,7 +186,7 @@ def register_device(
         return {
             "device_id": dup.id,
             "device_secret": secret,  # 明文仅此一次返回
-            "device": _device_out(dup),
+            "device": device_service.device_out(dup),
         }
 
     # 新设备：未指定来源时每台设备独占一个接入服务
@@ -237,7 +220,7 @@ def register_device(
         platform=body.platform,
         app_version=body.app_version,
         source_id=source.id,
-        device_secret_cipher=_encrypt_secret(secret),
+        device_secret_cipher=device_service.encrypt_secret(secret),
         last_seen_at=utcnow(),  # 注册即激活
     )
     db.add(device)
@@ -246,7 +229,7 @@ def register_device(
     return {
         "device_id": code,
         "device_secret": secret,  # 明文仅此一次返回
-        "device": _device_out(device),
+        "device": device_service.device_out(device),
     }
 
 
@@ -256,7 +239,7 @@ def list_devices(user: User = Depends(get_current_user), db: Session = Depends(g
     if user.role != "admin":
         query = query.filter(Device.user_id == user.id)
     query = query.filter(Device.is_deleted.is_(False))
-    return [_device_out(d) for d in query.order_by(Device.created_at.desc()).all()]
+    return [device_service.device_out(d) for d in query.order_by(Device.created_at.desc()).all()]
 
 
 @router.patch("/devices/{code}", response_model=DeviceOut)
@@ -278,7 +261,7 @@ def patch_device(
         device.is_active = body.is_active
     db.commit()
     db.refresh(device)
-    return _device_out(device)
+    return device_service.device_out(device)
 
 
 @router.post("/devices/{code}/reveal")
@@ -319,7 +302,7 @@ def regenerate_device_secret(
     """重置设备密钥（旧密钥立即失效），返回新密钥（仅此一次）。"""
     device = _get_own_device(db, user, code)
     secret = secrets.token_urlsafe(32)
-    device.device_secret_cipher = _encrypt_secret(secret)
+    device.device_secret_cipher = device_service.encrypt_secret(secret)
     db.commit()
     return {"device_id": device.id, "device_secret": secret}
 

@@ -10,7 +10,7 @@ import json as jsonlib
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.parse import quote
 
-from fastapi import HTTPException
+from app.core.errors import UpstreamError
 from sqlalchemy.orm import Session
 
 from app.services.settings_store import get_cfg, get_credential
@@ -23,13 +23,11 @@ def _json_or_502(body: bytes) -> dict:
     try:
         return jsonlib.loads(body.decode("utf-8", "replace"))
     except ValueError:
-        raise HTTPException(502, "Jellyfin 返回的不是有效 JSON") from None
+        raise UpstreamError("Jellyfin 返回的不是有效 JSON", 502) from None
 
-
-def _unauthorized(body: bytes) -> HTTPException:
+def _unauthorized(body: bytes) -> UpstreamError:
     """重认证后仍是 401：与 upstream_http 的错误文案保持一致（上游返回 401：<body>）。"""
-    return HTTPException(502, f"上游返回 401：{body[:200].decode('utf-8', 'replace')}")
-
+    return UpstreamError(f"上游返回 401：{body[:200].decode('utf-8', 'replace')}", 502)
 
 class JellyfinClient:
     def __init__(
@@ -56,7 +54,7 @@ class JellyfinClient:
         user = get_cfg(db, self._user_key)
         pwd = get_credential(db, self._pass_key)
         if not (url and user):
-            raise HTTPException(400, self._config_error)
+            raise UpstreamError(self._config_error, 400)
         return url, user, pwd
 
     def auth(self, url: str, user: str, pwd: str) -> tuple[str, str]:
@@ -73,13 +71,12 @@ class JellyfinClient:
         try:
             data = jsonlib.loads(resp.decode("utf-8", "replace"))
         except ValueError:
-            raise HTTPException(502, "Jellyfin 返回的不是有效 JSON（请检查服务器地址）") from None
-        token = data.get("AccessToken") or ""
-        uid = (data.get("User") or {}).get("Id") or ""
+            raise UpstreamError("Jellyfin 返回的不是有效 JSON（请检查服务器地址）", 502) from None
+            token = data.get("AccessToken") or ""
+            uid = (data.get("User") or {}).get("Id") or ""
         if not token:
-            raise HTTPException(502, "Jellyfin 认证失败：未获得令牌")
+            raise UpstreamError("Jellyfin 认证失败：未获得令牌", 502)
         return token, uid
-
     def token(self, db: Session) -> tuple[str, str, str]:
         """返回 (url, accessToken, jellyfin_user_id)；第三元素是 Jellyfin 用户 GUID。"""
         url, user, pwd = self.creds(db)
@@ -89,10 +86,6 @@ class JellyfinClient:
         token, uid = self.auth(url, user, pwd)
         self._tokens[url] = (token, uid)
         return url, token, uid
-
-    def cache_token(self, url: str, token: str, uid: str) -> None:
-        """测试连接成功后预置令牌缓存（免去随后播放的再一次认证）。"""
-        self._tokens[url] = (token, uid)
 
     def clear_tokens(self) -> None:
         """凭据变更后旧 accessToken（改密即被上游吊销）必须重认证。"""
@@ -147,7 +140,7 @@ class JellyfinClient:
             return open_stream_raw(f"{url}{path}", headers)
         except UrlHTTPError as e:
             if e.code != 401:
-                raise HTTPException(502, f"上游返回 {e.code}") from None
+                raise UpstreamError(f"上游返回 {e.code}", 502) from None
             self._tokens.pop(url, None)
             url, token, _ = self.token(db)
             headers = {"X-Emby-Token": token}
@@ -156,8 +149,7 @@ class JellyfinClient:
             try:
                 return open_stream_raw(f"{url}{path}", headers)
             except UrlHTTPError as e2:
-                raise HTTPException(502, f"上游返回 {e2.code}") from None
-
+                raise UpstreamError(f"上游返回 {e2.code}", 502) from None
     def post_progress(self, db: Session, item_id: str, position: float, stopped: bool = False) -> None:
         """进度双写上游（尽力而为，与音乐 Subsonic 双写同策略）：上报失败不影响本地记录。"""
         try:

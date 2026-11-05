@@ -6,6 +6,7 @@
 - 仅带文件名的部件视为附件（内嵌图不进附件列表）。
 """
 
+from collections import deque
 import base64
 import email
 import hashlib
@@ -16,7 +17,9 @@ import ssl
 from datetime import datetime, timezone
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
+from pathlib import Path
 
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -35,6 +38,8 @@ MAX_TEXT_PART = 5 * 1024 * 1024  # 单文本部件解码上限（防异常超大
 # 最近一次拉取的失败原因（进程内存）：poll_source 以「返回条数」为契约，
 # 失败与「没有新邮件」都返回 0，接口层由此区分为用户可见的错误提示。
 _last_errors: dict[int, str] = {}
+# 重拉邮件时登记的旧附件清理队列：after_commit 统一执行，回滚自动作废
+_PENDING_STALE: deque[tuple[Path, list[Path]]] = deque()
 
 
 def last_error(source_id: int) -> str | None:
@@ -233,16 +238,17 @@ def test_connection(
 
 
 def _update_existing_email(db: Session, existing: Message, parsed: dict, uid: int) -> None:
-    """同 ID 邮件重新拉取时刷新解析结果（正文图片内联等修复随重拉生效）。"""
+    """同 ID 邮件重新拉取时刷新解析结果（正文图片内联等修复随重拉生效）。
+
+    旧附件目录不能在这里先删：本函数只改内存对象，提交在整批邮件处理完的
+    db.commit()（poll_source 尾部）；先删后提交的话，中途任何一封失败回滚
+    会让 DB 仍指向已物理删除的旧附件（详情页附件 404）。改为先写新附件
+    （save_attachments 同名覆盖），把「删多余旧附件」延迟到提交成功之后。"""
     import json
     import shutil
     from pathlib import Path
 
     from app.core.config import settings
-
-    att_dir = Path(settings.DATA_DIR) / data_dirs.ATTACHMENTS / str(existing.source_id) / existing.dedup_hash[:16]
-    if att_dir.is_dir():
-        shutil.rmtree(att_dir, ignore_errors=True)
 
     saved = save_attachments(existing.source_id, existing.dedup_hash, parsed["attachments"])
     existing.sender = (parsed["sender"] or "")[:256]
@@ -255,6 +261,36 @@ def _update_existing_email(db: Session, existing: Message, parsed: dict, uid: in
     extra.update({"message_id": parsed["message_id"], "uid": uid, "sender_email": parsed["sender_email"]})
     existing.extra = json.dumps(extra, ensure_ascii=False)
     db.add(existing)
+
+    # 登记「提交成功后删除多余旧附件」的清理动作（延迟到 after_commit 执行，
+    # 回滚即自动作废——防先删后回滚造成附件死链）
+    att_dir = Path(settings.DATA_DIR) / data_dirs.ATTACHMENTS / str(existing.source_id) / existing.dedup_hash[:16]
+    keep = {Path(a["filename"]).name for a in saved}
+    stale = [p for p in att_dir.iterdir() if p.is_file() and p.name not in keep] if att_dir.is_dir() else []
+    if stale:
+        _PENDING_STALE.append((att_dir, stale))
+
+
+def _purge_stale_attachments() -> None:
+    """执行并清空登记的旧附件删除动作（仅提交成功后调用）。"""
+    while _PENDING_STALE:
+        att_dir, stale = _PENDING_STALE.popleft()
+        for p in stale:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            if att_dir.is_dir() and not any(att_dir.iterdir()):
+                att_dir.rmdir()
+        except OSError:
+            pass
+
+
+@event.listens_for(Session, "after_commit")
+def _after_commit_purge(session) -> None:  # noqa: ANN001
+    if _PENDING_STALE:
+        _purge_stale_attachments()
 
 
 def poll_source(source_id: int, limit: int | None = None) -> int:

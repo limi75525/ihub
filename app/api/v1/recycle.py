@@ -22,7 +22,6 @@ from app.core.deps import get_current_user
 from app.core.fsutil import safe_mtime
 from app.core.timeutil import as_utc
 from app.db.session import get_db
-from app.api.v1.books import _purge_book
 from app.models.book import Book
 from app.models.device import Device
 from app.models.logo_rule import LogoRule
@@ -30,19 +29,14 @@ from app.models.message import Message
 from app.models.source import Source
 from app.models.user import User
 from app.scheduler import sync_email_jobs
+from app.services import book_service
+from app.services.recycle_service import recycle_enabled
 from app.services.ingest_service import delete_attachments
 from app.services.purge import PURGE_DAYS
 
 router = APIRouter(prefix="/recycle", tags=["recycle"])
 
 RECYCLE_TYPES = ("message", "logo", "source", "book")
-
-
-def recycle_enabled() -> bool:
-    """回收站开关（系统设置，管理员可改）。读库走独立短会话，供各删除入口调用。"""
-    from app.models.system_setting import get_setting
-
-    return get_setting("recycle_enabled", "true") == "true"
 
 
 def _now() -> datetime:
@@ -303,7 +297,7 @@ def recycle_logo_file(
         raise HTTPException(404, "Logo 文件缺失")
     from fastapi.responses import FileResponse
 
-    from app.api.v1.auth import media_file_headers
+    from app.services.uploads import media_file_headers
 
     return FileResponse(path, headers=media_file_headers(path))
 
@@ -480,7 +474,7 @@ def _purge_books(db: Session, user: User, ids: list[int]) -> int:
         q = q.filter(Book.id.in_(ids))
     rows = q.all()
     for b in rows:
-        _purge_book(db, b)
+        book_service.purge_book(db, b)
     return len(rows)
 
 

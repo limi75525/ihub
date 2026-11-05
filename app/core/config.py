@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "iHub"
     # 后端版本：与 Web 前端版本同步递增（发版时一起改），版本更新检查用
-    APP_VERSION: str = "1.7.3"
+    APP_VERSION: str = "1.7.4"
 
     # 数据目录：SQLite 数据库、附件、密钥都放这里，Docker 挂载卷指向它
     # 默认落在仓库内 iHub/data（与 docker-compose 的 ./data 挂载点一致）
@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # 私网/环回/链路本地/保留段的域名（登录用户可借此探测内网，IMAP 协议 SSRF）。
     # 自建内网邮件服务器的部署设 IHUB_ALLOW_PRIVATE_EMAIL_HOST=true 豁免。
     ALLOW_PRIVATE_EMAIL_HOST: bool = False
+    # 自建内网 npm 镜像（图标库自定义下载）的部署设 IHUB_ALLOW_PRIVATE_BRAND_MIRROR=true 豁免。
+    ALLOW_PRIVATE_BRAND_MIRROR: bool = False
 
 
 settings = Settings()
